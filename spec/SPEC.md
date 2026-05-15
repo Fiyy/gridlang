@@ -429,9 +429,340 @@ If the present section contains no `<style>` tag, a default stylesheet is applie
 - MIME type: `text/x-gridlang`
 - Magic bytes: Files starting with `--- meta ---` (after optional BOM/whitespace)
 
-## 10. Future Extensions (v2.0 Roadmap)
+## 10. Conditional Formatting (v0.2)
 
-- **Multi-sheet** — Multiple data sections in one file (`--- data:sheet_name ---`)
+The compute layer may define an optional `conditional_formats()` function that specifies cell-level formatting rules.
+
+### 10.1 Interface
+
+```python
+def conditional_formats() -> list[dict]:
+    """
+    Define conditional formatting rules.
+    
+    Returns:
+        List of rule dictionaries.
+    """
+    return [
+        {
+            "column": "Growth_Rate",
+            "rule": "greater_than",
+            "value": 50,
+            "style": {"background": "#d4edda", "color": "#155724", "bold": True}
+        },
+        {
+            "column": "Growth_Rate",
+            "rule": "less_than",
+            "value": 0,
+            "style": {"background": "#f8d7da", "color": "#721c24"}
+        }
+    ]
+```
+
+### 10.2 Supported Rules
+
+| Rule | Value Type | Description |
+|------|-----------|-------------|
+| `greater_than` | number | Cell value > value |
+| `less_than` | number | Cell value < value |
+| `equals` | any | Cell value == value |
+| `between` | [min, max] | min <= cell value <= max |
+| `color_scale` | [min_color, max_color] | Gradient based on value range |
+| `data_bar` | color string | Bar width proportional to value |
+
+### 10.3 Rule Dictionary Keys
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `column` | string | Yes | Target column name |
+| `rule` | string | Yes | Rule type (see §10.2) |
+| `value` | varies | Yes | Threshold value(s) |
+| `style` | dict | Yes | CSS-like style properties |
+
+### 10.4 Style Properties
+
+Style dictionaries support the following properties:
+
+- `background` — Background color (CSS color string)
+- `color` — Text color (CSS color string)
+- `bold` — Bold text (boolean)
+- `italic` — Italic text (boolean)
+- `border` — Border style (CSS border string)
+
+## 11. Built-in Formula Library (v0.2)
+
+GridLang provides 59 Excel-compatible functions that are automatically injected into the compute sandbox namespace. These functions operate on pandas Series/DataFrames and mirror the behavior of their Excel counterparts.
+
+### 11.1 Statistical Functions
+
+| Function | Description |
+|----------|-------------|
+| `SUMIF(range, criteria, sum_range)` | Sum cells matching criteria |
+| `SUMIFS(sum_range, *criteria_pairs)` | Sum cells matching multiple criteria |
+| `COUNTIF(range, criteria)` | Count cells matching criteria |
+| `COUNTIFS(range, *criteria_pairs)` | Count cells matching multiple criteria |
+| `AVERAGEIF(range, criteria, avg_range)` | Average of cells matching criteria |
+| `AVERAGEIFS(avg_range, *criteria_pairs)` | Average matching multiple criteria |
+| `MAXIFS(range, *criteria_pairs)` | Maximum matching criteria |
+| `MINIFS(range, *criteria_pairs)` | Minimum matching criteria |
+| `MEDIAN(range)` | Median value |
+| `STDEV(range)` | Standard deviation (sample) |
+| `VAR(range)` | Variance (sample) |
+| `PERCENTILE(range, k)` | k-th percentile |
+| `RANK(value, range, order)` | Rank of value in range |
+
+### 11.2 Lookup Functions
+
+| Function | Description |
+|----------|-------------|
+| `VLOOKUP(value, table, col_index, approx)` | Vertical lookup |
+| `HLOOKUP(value, table, row_index, approx)` | Horizontal lookup |
+| `XLOOKUP(lookup, lookup_range, return_range, not_found, match_mode)` | Modern lookup (exact/wildcard/binary) |
+| `INDEX(range, row, col)` | Value at row/col intersection |
+| `MATCH(value, range, match_type)` | Position of value in range |
+| `OFFSET(ref, rows, cols, height, width)` | Reference offset by rows/cols |
+| `INDIRECT(ref_string)` | Evaluate text as reference |
+
+### 11.3 Text Functions
+
+| Function | Description |
+|----------|-------------|
+| `LEFT(text, n)` | First n characters |
+| `RIGHT(text, n)` | Last n characters |
+| `MID(text, start, n)` | Substring from position |
+| `LEN(text)` | String length |
+| `TRIM(text)` | Remove leading/trailing spaces |
+| `UPPER(text)` | Convert to uppercase |
+| `LOWER(text)` | Convert to lowercase |
+| `PROPER(text)` | Title case |
+| `SUBSTITUTE(text, old, new, instance)` | Replace text |
+| `CONCATENATE(*args)` | Join strings |
+| `TEXT(value, format_str)` | Format value as text |
+| `FIND(find_text, within_text, start)` | Find position (case-sensitive) |
+| `SEARCH(find_text, within_text, start)` | Find position (case-insensitive) |
+
+### 11.4 Date Functions
+
+| Function | Description |
+|----------|-------------|
+| `YEAR(date)` | Extract year |
+| `MONTH(date)` | Extract month |
+| `DAY(date)` | Extract day |
+| `TODAY()` | Current date |
+| `NOW()` | Current datetime |
+| `DATEDIF(start, end, unit)` | Difference between dates |
+| `EOMONTH(start, months)` | End of month offset |
+| `NETWORKDAYS(start, end, holidays)` | Working days between dates |
+| `WEEKDAY(date, return_type)` | Day of week |
+
+### 11.5 Logic Functions
+
+| Function | Description |
+|----------|-------------|
+| `IF(condition, true_val, false_val)` | Conditional value |
+| `IFS(*condition_value_pairs)` | Multiple conditions |
+| `SWITCH(expr, *case_value_pairs, default)` | Match expression to cases |
+| `AND(*conditions)` | All conditions true |
+| `OR(*conditions)` | Any condition true |
+| `NOT(condition)` | Negate condition |
+| `IFERROR(value, error_val)` | Handle errors |
+| `IFNA(value, na_val)` | Handle NA values |
+
+### 11.6 Math Functions
+
+| Function | Description |
+|----------|-------------|
+| `ROUND(value, decimals)` | Round to n decimal places |
+| `ROUNDUP(value, decimals)` | Round up (away from zero) |
+| `ROUNDDOWN(value, decimals)` | Round down (toward zero) |
+| `CEILING(value, significance)` | Round up to nearest multiple |
+| `FLOOR(value, significance)` | Round down to nearest multiple |
+| `MOD(value, divisor)` | Modulo remainder |
+| `ABS(value)` | Absolute value |
+| `POWER(base, exponent)` | Exponentiation |
+
+### 11.7 Data Analysis Functions
+
+| Function | Description |
+|----------|-------------|
+| `PIVOT(df, values, index, columns, aggfunc)` | Create pivot table |
+| `SORT(range, col, order)` | Sort data by column |
+| `FILTER(range, criteria)` | Filter rows by criteria |
+| `UNIQUE(range)` | Unique values |
+| `GROUPBY(df, by, agg)` | Group and aggregate |
+| `TRANSPOSE(range)` | Transpose rows/columns |
+
+### 11.8 Usage
+
+All functions are auto-injected into the compute namespace. No imports are required:
+
+```python
+def transform(df):
+    df['High_Revenue'] = COUNTIF(df['Revenue'], '>10000')
+    df['Region_Lookup'] = VLOOKUP(df['Code'], ref_table, 2, False)
+    df['Year'] = YEAR(df['Date'])
+    df['Label'] = IF(df['Growth'] > 0, 'Growing', 'Declining')
+    df['Rounded'] = CEILING(df['Revenue'], 1000)
+    
+    summary = PIVOT(df, values='Revenue', index='Region', 
+                    columns='Quarter', aggfunc='sum')
+    return df
+```
+
+## 12. Charts (v0.2)
+
+GridLang provides 9 SVG chart types available as template functions in the present section. All charts render as inline SVG elements and are fully responsive.
+
+### 12.1 Available Chart Types
+
+| Function | Description |
+|----------|-------------|
+| `sparkline(series, width, height, color)` | Inline mini line chart |
+| `bar_chart(labels, values, **opts)` | Vertical bar chart |
+| `line_chart(x, y, **opts)` | Line chart with optional markers |
+| `pie_chart(labels, values, **opts)` | Pie/donut chart |
+| `scatter_chart(x, y, **opts)` | Scatter plot |
+| `area_chart(x, y, **opts)` | Filled area chart |
+| `stacked_bar_chart(labels, datasets, **opts)` | Stacked bar chart |
+| `heatmap(matrix, x_labels, y_labels, **opts)` | Color-coded matrix |
+| `color_scale(value, min, max, **opts)` | Single-cell color indicator |
+
+### 12.2 Common Options
+
+All chart functions accept the following keyword arguments:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `width` | int | 400 | Chart width in pixels |
+| `height` | int | 300 | Chart height in pixels |
+| `title` | string | None | Chart title |
+| `colors` | list[string] | theme | Color palette |
+| `legend` | bool | True | Show legend |
+| `animate` | bool | False | Enable CSS animations |
+
+### 12.3 Example Usage
+
+```html
+<div class="charts">
+  <!-- Sparklines in table cells -->
+  {% for _, row in df.iterrows() %}
+  <tr>
+    <td>{{ row.Product }}</td>
+    <td>{{ sparkline([row.Q1, row.Q2, row.Q3, row.Q4], width=80, height=20) }}</td>
+  </tr>
+  {% endfor %}
+
+  <!-- Full bar chart -->
+  {{ bar_chart(df['Product'].tolist(), df['Annual_Total'].tolist(),
+               title="Revenue by Product", colors=["#2563eb"]) }}
+
+  <!-- Pie chart -->
+  {{ pie_chart(df['Region'].tolist(), df['Revenue'].tolist(),
+               title="Revenue by Region") }}
+
+  <!-- Heatmap -->
+  {{ heatmap(df[['Q1','Q2','Q3','Q4']].values,
+             x_labels=['Q1','Q2','Q3','Q4'],
+             y_labels=df['Product'].tolist(),
+             title="Quarterly Performance") }}
+</div>
+```
+
+## 13. Import/Export (v0.2)
+
+GridLang supports importing from and exporting to common spreadsheet formats.
+
+### 13.1 CSV Import/Export
+
+```bash
+# Import CSV to .grid (creates minimal file with data section populated)
+gridlang import data.csv -o output.grid
+
+# Export data section to CSV
+gridlang export report.grid -f csv -o output.csv
+```
+
+### 13.2 Excel Import
+
+```bash
+gridlang import workbook.xlsx -o output.grid
+```
+
+Import capabilities:
+- **Formula conversion** — Excel formulas are translated to equivalent Python compute code
+- **Style extraction** — Cell formatting is converted to present layer CSS and conditional_formats()
+- **Multi-sheet** — Each worksheet becomes a `data:sheet_name` section
+- **Named ranges** — Preserved as comments in the compute layer
+
+### 13.3 Excel Export
+
+```bash
+gridlang export report.grid -f xlsx -o output.xlsx
+```
+
+Export capabilities:
+- **Native charts** — SVG charts are converted to native Excel chart objects
+- **Conditional formatting** — `conditional_formats()` rules become Excel conditional formatting
+- **Frozen headers** — First row is automatically frozen as header
+- **Styled output** — Present layer styles mapped to Excel cell formats where applicable
+
+### 13.4 Round-Trip Support
+
+GridLang supports round-trip conversion:
+
+```bash
+# Excel → GridLang → Excel (lossless for supported features)
+gridlang import original.xlsx -o working.grid
+# ... edit the .grid file ...
+gridlang export working.grid -f xlsx -o updated.xlsx
+```
+
+Round-trip guarantees:
+- Data values are preserved exactly
+- Column types are maintained
+- Conditional formatting rules survive the round-trip
+- Chart types are mapped to closest equivalent
+
+## 14. Live Preview Server (v0.2)
+
+GridLang includes a built-in development server for live preview during editing.
+
+### 14.1 Usage
+
+```bash
+gridlang serve file.grid --port 8080
+```
+
+### 14.2 Features
+
+- **Auto-reload** — Browser automatically refreshes when the `.grid` file changes on disk
+- **File watching** — Uses filesystem events (inotify/FSEvents/kqueue) for instant detection
+- **Error overlay** — Parse/compute/render errors displayed as overlay without losing last good state
+- **Hot recompute** — Only re-executes changed layers (e.g., editing present layer skips recompute)
+
+### 14.3 Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | 8080 | Server port |
+| `--host` | localhost | Bind address |
+| `--no-open` | false | Don't auto-open browser |
+| `--watch-dir` | file's dir | Additional directories to watch |
+| `--debounce` | 300ms | Debounce delay for rapid changes |
+
+### 14.4 Example Workflow
+
+```bash
+# Start the preview server
+gridlang serve dashboard.grid --port 3000
+
+# In another terminal, edit the file
+# Browser updates automatically on every save
+```
+
+## 15. Future Extensions (v2.0 Roadmap)
+
+- ~~**Multi-sheet** — Multiple data sections in one file (`--- data:sheet_name ---`)~~ ✓ DONE (v0.2, see §4.5)
 - **Reactive bindings** — Two-way binding between present layer edits and data layer
 - **Remote data sources** — `--- data:url ---` to fetch from APIs
 - **Chart DSL** — Simplified chart declaration syntax within present layer
