@@ -1,0 +1,133 @@
+--- meta ---
+name: "Pivot Tables & Charts Showcase"
+engine: python
+version: "1.0"
+description: "Demonstrating pivot tables, multiple chart types, and Excel-style formulas"
+
+--- data ---
+Date,Region,Product,Units,Revenue,Cost
+2024-01-15,North,Widget,120,24000,14400
+2024-01-20,South,Gadget,80,32000,19200
+2024-02-10,East,Widget,95,19000,11400
+2024-02-15,West,Gadget,110,44000,26400
+2024-03-05,North,Gadget,65,26000,15600
+2024-03-20,South,Widget,140,28000,16800
+2024-04-10,East,Gadget,90,36000,21600
+2024-04-25,West,Widget,105,21000,12600
+2024-05-12,North,Widget,130,26000,15600
+2024-05-18,South,Gadget,75,30000,18000
+2024-06-08,East,Widget,110,22000,13200
+2024-06-22,West,Gadget,95,38000,22800
+
+--- compute ---
+def transform(df):
+    # Use Excel-style formulas
+    df['Profit'] = df['Revenue'] - df['Cost']
+    df['Margin_Pct'] = ROUND((df['Profit'] / df['Revenue']) * 100, 1)
+    df['Month'] = pd.to_datetime(df['Date']).dt.strftime('%b')
+
+    return df
+
+def aggregates(df):
+    # Pivot by Region
+    region_pivot = PIVOT(df, index='Region', values=['Revenue', 'Profit', 'Units'], aggfunc='sum')
+
+    # Pivot by Product
+    product_pivot = PIVOT(df, index='Product', values=['Revenue', 'Units'], aggfunc='sum')
+
+    # Monthly trend
+    monthly = df.groupby('Month')['Revenue'].sum()
+
+    return {
+        'total_revenue': df['Revenue'].sum(),
+        'total_profit': df['Profit'].sum(),
+        'overall_margin': ROUND(df['Profit'].sum() / df['Revenue'].sum() * 100, 1),
+        'total_units': df['Units'].sum(),
+        'top_region': df.groupby('Region')['Revenue'].sum().idxmax(),
+        'top_product': df.groupby('Product')['Revenue'].sum().idxmax(),
+        'avg_order_value': ROUND(df['Revenue'].mean(), 0),
+        # Store pivots for chart use
+        'region_labels': region_pivot['Region'].tolist(),
+        'region_revenue': region_pivot['Revenue'].tolist(),
+        'region_profit': region_pivot['Profit'].tolist(),
+        'product_labels': product_pivot['Product'].tolist(),
+        'product_revenue': product_pivot['Revenue'].tolist(),
+        'monthly_labels': monthly.index.tolist(),
+        'monthly_revenue': monthly.values.tolist(),
+    }
+
+def conditional_formats():
+    return [
+        {'column': 'Margin_Pct', 'rule': 'color_scale', 'value': 30, 'value2': 50,
+         'min_color': '#fecaca', 'max_color': '#bbf7d0'},
+        {'column': 'Profit', 'rule': 'data_bar', 'value': 25000},
+    ]
+
+--- present ---
+<style>
+  .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin: 2rem 0; }
+  .chart-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; }
+  .chart-title { font-size: 0.9rem; font-weight: 600; color: #374151; margin-bottom: 1rem; }
+  @media (max-width: 768px) { .chart-grid { grid-template-columns: 1fr; } }
+</style>
+
+<h1>{{ meta.name }}</h1>
+<p>{{ meta.description }}</p>
+
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="kpi-value">{{ format_currency(agg.total_revenue) }}</div>
+    <div class="kpi-label">Total Revenue</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ format_currency(agg.total_profit) }}</div>
+    <div class="kpi-label">Total Profit</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ format_pct(agg.overall_margin) }}</div>
+    <div class="kpi-label">Profit Margin</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ format_number(agg.total_units, 0) }}</div>
+    <div class="kpi-label">Units Sold</div>
+  </div>
+</div>
+
+<div class="chart-grid">
+  <div class="chart-card">
+    <div class="chart-title">Revenue by Region</div>
+    {{ bar_chart(agg.region_labels, agg.region_revenue, title="", width=400, height=250) }}
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">Revenue by Product</div>
+    {{ pie_chart(agg.product_labels, agg.product_revenue, width=300, height=300) }}
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">Monthly Revenue Trend</div>
+    {{ line_chart(agg.monthly_labels, agg.monthly_revenue, width=400, height=250) }}
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">Revenue vs Profit by Region</div>
+    {{ stacked_bar_chart(agg.region_labels, {'Revenue': agg.region_revenue, 'Profit': agg.region_profit}, width=400, height=250) }}
+  </div>
+</div>
+
+<h2>Transaction Detail</h2>
+<table>
+  <thead>
+    <tr><th>Date</th><th>Region</th><th>Product</th><th>Units</th><th>Revenue</th><th>Profit</th><th>Margin</th></tr>
+  </thead>
+  <tbody>
+  {% for _, row in df.iterrows() %}
+    <tr>
+      <td>{{ row.Date }}</td>
+      <td>{{ row.Region }}</td>
+      <td>{{ row.Product }}</td>
+      <td class="number">{{ row.Units }}</td>
+      <td class="number">{{ format_currency(row.Revenue) }}</td>
+      <td class="number">{{ format_currency(row.Profit) }}</td>
+      <td class="number" {{ cond_style('Margin_Pct', row.Margin_Pct) }}>{{ format_pct(row.Margin_Pct) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>

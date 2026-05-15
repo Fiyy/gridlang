@@ -1,0 +1,72 @@
+--- meta ---
+name: "Hello GridLang"
+engine: python
+version: "1.0"
+description: "A minimal example showing the basic structure of a .grid file"
+
+--- data ---
+Name,Score,Subject
+Alice,92,Math
+Bob,85,Science
+Charlie,78,Math
+Diana,95,Science
+Eve,88,Math
+
+--- compute ---
+def transform(df):
+    # Assign letter grades based on score
+    def grade(score):
+        if score >= 90:
+            return 'A'
+        elif score >= 80:
+            return 'B'
+        elif score >= 70:
+            return 'C'
+        else:
+            return 'D'
+
+    df['Grade'] = df['Score'].apply(grade)
+    df['Pass'] = df['Score'] >= 60
+    return df
+
+def aggregates(df):
+    return {
+        'average_score': round(df['Score'].mean(), 1),
+        'top_student': df.loc[df['Score'].idxmax(), 'Name'],
+        'pass_rate': f"{(df['Pass'].sum() / len(df) * 100):.0f}%",
+    }
+
+--- present ---
+<h2>{{ meta.name }}</h2>
+<p>{{ meta.description }}</p>
+
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.average_score }}</div>
+    <div class="kpi-label">Average Score</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.top_student }}</div>
+    <div class="kpi-label">Top Student</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.pass_rate }}</div>
+    <div class="kpi-label">Pass Rate</div>
+  </div>
+</div>
+
+<table>
+  <thead>
+    <tr><th>Name</th><th>Subject</th><th>Score</th><th>Grade</th></tr>
+  </thead>
+  <tbody>
+    {% for _, row in df.iterrows() %}
+    <tr>
+      <td>{{ row.Name }}</td>
+      <td>{{ row.Subject }}</td>
+      <td>{{ row.Score }}</td>
+      <td>{{ row.Grade }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

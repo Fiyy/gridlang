@@ -1,0 +1,165 @@
+--- meta ---
+name: "Startup Financial Model"
+engine: python
+version: "1.0"
+description: "3-year revenue projection with unit economics and burn rate analysis"
+author: "Finance Team"
+tags: ["finance", "projection", "startup"]
+
+--- data ---
+Month,Revenue,COGS,Marketing,Engineering,Operations,Headcount
+2024-01,50000,15000,20000,80000,10000,12
+2024-02,55000,16500,22000,80000,10000,12
+2024-03,62000,18600,25000,85000,11000,13
+2024-04,71000,21300,28000,85000,11000,13
+2024-05,80000,24000,30000,90000,12000,14
+2024-06,92000,27600,32000,90000,12000,14
+2024-07,108000,32400,35000,95000,13000,15
+2024-08,125000,37500,38000,95000,13000,15
+2024-09,145000,43500,40000,100000,14000,16
+2024-10,168000,50400,42000,100000,14000,16
+2024-11,195000,58500,45000,105000,15000,17
+2024-12,225000,67500,48000,105000,15000,17
+
+--- compute ---
+def transform(df):
+    # Parse month as datetime
+    df['Month'] = pd.to_datetime(df['Month'])
+
+    # Total expenses
+    expense_cols = ['COGS', 'Marketing', 'Engineering', 'Operations']
+    df['Total_Expenses'] = df[expense_cols].sum(axis=1)
+
+    # Profit/Loss
+    df['Net_Income'] = df['Revenue'] - df['Total_Expenses']
+
+    # Gross margin
+    df['Gross_Margin'] = ((df['Revenue'] - df['COGS']) / df['Revenue'] * 100).round(1)
+
+    # Burn rate (negative net income months)
+    df['Burn_Rate'] = df['Net_Income'].apply(lambda x: abs(x) if x < 0 else 0)
+
+    # MoM revenue growth
+    df['MoM_Growth'] = (df['Revenue'].pct_change() * 100).round(1)
+    df['MoM_Growth'] = df['MoM_Growth'].fillna(0)
+
+    # Revenue per head
+    df['Rev_Per_Head'] = (df['Revenue'] / df['Headcount']).round(0)
+
+    # Cumulative revenue
+    df['Cumulative_Revenue'] = df['Revenue'].cumsum()
+
+    # Runway indicator
+    df['Profitable'] = df['Net_Income'] > 0
+
+    return df
+
+def aggregates(df):
+    total_revenue = df['Revenue'].sum()
+    total_expenses = df['Total_Expenses'].sum()
+    total_net = df['Net_Income'].sum()
+
+    # Month of breakeven
+    profitable_months = df[df['Profitable']]
+    breakeven_month = profitable_months.iloc[0]['Month'].strftime('%B %Y') if not profitable_months.empty else 'Not yet'
+
+    # Average growth
+    avg_growth = df['MoM_Growth'].iloc[1:].mean()
+
+    # Burn analysis
+    burning_months = df[~df['Profitable']]
+    total_burn = burning_months['Burn_Rate'].sum() if not burning_months.empty else 0
+
+    return {
+        'total_revenue': total_revenue,
+        'total_expenses': total_expenses,
+        'net_income': total_net,
+        'avg_monthly_growth': round(avg_growth, 1),
+        'gross_margin_avg': round(df['Gross_Margin'].mean(), 1),
+        'breakeven_month': breakeven_month,
+        'total_burn': total_burn,
+        'final_headcount': int(df['Headcount'].iloc[-1]),
+        'final_rev_per_head': int(df['Rev_Per_Head'].iloc[-1]),
+    }
+
+--- present ---
+<style>
+  .metric-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin: 1.5rem 0; }
+  .metric { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white; padding: 1.25rem; border-radius: 12px; }
+  .metric-value { font-size: 1.5rem; font-weight: 700; }
+  .metric-label { font-size: 0.8rem; opacity: 0.9; margin-top: 0.25rem; }
+  .metric.green { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
+  .metric.red { background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%); }
+  .metric.blue { background: linear-gradient(135deg, #2196f3 0%, #21cbf3 100%); }
+  .section-title { margin-top: 2rem; color: #374151; border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5rem; }
+  .profitable { background-color: #ecfdf5; }
+  .unprofitable { background-color: #fef2f2; }
+</style>
+
+<h1>{{ meta.name }}</h1>
+<p>{{ meta.description }}</p>
+
+<div class="metric-row">
+  <div class="metric">
+    <div class="metric-value">{{ format_currency(agg.total_revenue) }}</div>
+    <div class="metric-label">Total Revenue (12mo)</div>
+  </div>
+  <div class="metric green">
+    <div class="metric-value">{{ agg.breakeven_month }}</div>
+    <div class="metric-label">Breakeven Month</div>
+  </div>
+  <div class="metric blue">
+    <div class="metric-value">{{ format_pct(agg.avg_monthly_growth) }}</div>
+    <div class="metric-label">Avg MoM Growth</div>
+  </div>
+  <div class="metric red">
+    <div class="metric-value">{{ format_currency(agg.total_burn) }}</div>
+    <div class="metric-label">Total Cash Burn</div>
+  </div>
+</div>
+
+<h3 class="section-title">Monthly P&L</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Month</th><th>Revenue</th><th>Expenses</th>
+      <th>Net Income</th><th>Gross Margin</th><th>Growth</th><th>Headcount</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for _, row in df.iterrows() %}
+    <tr class="{% if row.Profitable %}profitable{% else %}unprofitable{% endif %}">
+      <td>{{ row.Month.strftime('%b %Y') }}</td>
+      <td class="number">{{ format_currency(row.Revenue) }}</td>
+      <td class="number">{{ format_currency(row.Total_Expenses) }}</td>
+      <td class="number {% if row.Net_Income >= 0 %}growth-positive{% else %}growth-negative{% endif %}">
+        {{ format_currency(row.Net_Income) }}
+      </td>
+      <td class="number">{{ format_pct(row.Gross_Margin) }}</td>
+      <td class="number">{% if row.MoM_Growth > 0 %}+{% endif %}{{ format_pct(row.MoM_Growth) }}</td>
+      <td class="number">{{ row.Headcount }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3 class="section-title">Unit Economics</h3>
+<div class="metric-row">
+  <div class="metric blue">
+    <div class="metric-value">{{ format_pct(agg.gross_margin_avg) }}</div>
+    <div class="metric-label">Avg Gross Margin</div>
+  </div>
+  <div class="metric">
+    <div class="metric-value">{{ agg.final_headcount }}</div>
+    <div class="metric-label">Team Size (Final)</div>
+  </div>
+  <div class="metric green">
+    <div class="metric-value">{{ format_currency(agg.final_rev_per_head) }}</div>
+    <div class="metric-label">Revenue / Head (Final)</div>
+  </div>
+  <div class="metric blue">
+    <div class="metric-value">{{ format_currency(agg.net_income) }}</div>
+    <div class="metric-label">Net Income (12mo)</div>
+  </div>
+</div>

@@ -1,0 +1,111 @@
+--- meta ---
+name: "Q1-Q4 Sales Report"
+engine: python
+version: "1.0"
+description: "Quarterly sales analysis with growth metrics and product ranking"
+author: "Sales Analytics Team"
+tags: ["sales", "quarterly", "2024"]
+
+--- data ---
+Product,Q1,Q2,Q3,Q4,Region,Category
+Widget_Pro,15000,18200,22000,28500,North,Hardware
+Widget_Lite,12000,14000,16500,19000,South,Hardware
+Gadget_X,8000,9500,11000,14200,East,Electronics
+Tool_Master,20000,21000,19500,23000,West,Tools
+Sensor_V2,5500,7200,9800,13000,North,Electronics
+Cable_Kit,9000,9200,9100,9300,South,Accessories
+Power_Hub,11000,13500,16000,20000,East,Electronics
+Grip_Pro,7500,7800,8200,8900,West,Tools
+
+--- compute ---
+def transform(df):
+    quarters = ['Q1', 'Q2', 'Q3', 'Q4']
+
+    # Annual total revenue
+    df['Annual_Total'] = df[quarters].sum(axis=1)
+
+    # Quarter-over-quarter growth (Q4 vs Q1)
+    df['Growth_Rate'] = ((df['Q4'] - df['Q1']) / df['Q1'] * 100).round(1)
+
+    # Rank by total revenue
+    df['Rank'] = df['Annual_Total'].rank(ascending=False).astype(int)
+
+    # Performance category
+    df['Performance'] = df['Growth_Rate'].apply(
+        lambda x: 'Star' if x > 50 else 'Stable' if x > 10 else 'Flat'
+    )
+
+    # Sort by rank
+    df = df.sort_values('Rank').reset_index(drop=True)
+
+    return df
+
+def aggregates(df):
+    return {
+        'total_revenue': df['Annual_Total'].sum(),
+        'avg_growth': round(df['Growth_Rate'].mean(), 1),
+        'top_product': df.loc[df['Annual_Total'].idxmax(), 'Product'],
+        'star_count': int((df['Performance'] == 'Star').sum()),
+        'best_region': df.groupby('Region')['Annual_Total'].sum().idxmax(),
+        'product_count': len(df),
+    }
+
+--- present ---
+<style>
+  .star { color: #f59e0b; font-weight: bold; }
+  .stable { color: #10b981; }
+  .flat { color: #6b7280; }
+  .growth-positive { color: #059669; }
+  .growth-negative { color: #dc2626; }
+</style>
+
+<h1>{{ meta.name }}</h1>
+<p>{{ meta.description }}</p>
+
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="kpi-value">{{ format_currency(agg.total_revenue) }}</div>
+    <div class="kpi-label">Total Annual Revenue</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ format_pct(agg.avg_growth) }}</div>
+    <div class="kpi-label">Average Growth</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.top_product }}</div>
+    <div class="kpi-label">Top Product</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.star_count }}/{{ agg.product_count }}</div>
+    <div class="kpi-label">Star Performers</div>
+  </div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th><th>Product</th><th>Category</th><th>Region</th>
+      <th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th>
+      <th>Annual Total</th><th>Growth</th><th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for _, row in df.iterrows() %}
+    <tr>
+      <td>{{ row.Rank }}</td>
+      <td><strong>{{ row.Product }}</strong></td>
+      <td>{{ row.Category }}</td>
+      <td>{{ row.Region }}</td>
+      <td class="number">{{ format_currency(row.Q1) }}</td>
+      <td class="number">{{ format_currency(row.Q2) }}</td>
+      <td class="number">{{ format_currency(row.Q3) }}</td>
+      <td class="number">{{ format_currency(row.Q4) }}</td>
+      <td class="number"><strong>{{ format_currency(row.Annual_Total) }}</strong></td>
+      <td class="number {% if row.Growth_Rate > 0 %}growth-positive{% else %}growth-negative{% endif %}">
+        {{ format_pct(row.Growth_Rate) }}
+      </td>
+      <td class="{{ row.Performance|lower }}">{{ row.Performance }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

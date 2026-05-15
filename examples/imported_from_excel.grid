@@ -1,0 +1,68 @@
+--- meta ---
+name: "sample_input"
+engine: python
+version: "1.0"
+description: "Imported from sample_input.xlsx"
+imported_from: "sample_input.xlsx"
+import_date: "2026-05-15 11:15"
+sheets: ["Sales", "Regions"]
+
+--- data:sales ---
+Product,Q1_Revenue,Q2_Revenue,Q3_Revenue,Q4_Revenue
+Laptop,50000,55000,60000,70000
+Phone,80000,85000,90000,95000
+Tablet,30000,32000,35000,38000
+Watch,15000,18000,22000,28000
+Total,,,,
+
+--- data:regions ---
+Region,Revenue,Target
+North,120000,100000
+South,95000,110000
+East,110000,105000
+West,88000,90000
+
+--- compute ---
+def transform(df):
+    # Auto-converted from Excel formulas
+    # Review and adjust as needed
+
+    # Cell B6: =SUM(B2:B5)
+    # → df['col_B'].sum()
+    # Cell C6: =SUM(C2:C5)
+    # → df['col_C'].sum()
+
+    return df
+
+--- present ---
+<style>
+  .imported-table { width: 100%; border-collapse: collapse; }
+  .imported-table th { background: #1e40af; color: white; padding: 0.6rem; text-align: left; font-weight: 600; }
+  .imported-table td { padding: 0.5rem; border-bottom: 1px solid #e5e7eb; }
+  .imported-table tr:nth-child(even) { background: #f9fafb; }
+  .imported-table tr:hover { background: #eff6ff; }
+  .number { text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+
+<h1>{{ meta.name }}</h1>
+<p><em>Imported from {{ meta.imported_from }}</em></p>
+
+<div class="sheet-tabs">
+  <div class="sheet-tab active">Sales</div>
+  <div class="sheet-tab">Regions</div>
+</div>
+
+<table class="imported-table">
+  <thead><tr>
+    {% for col in df.columns %}<th>{{ col }}</th>{% endfor %}
+  </tr></thead>
+  <tbody>
+    {% for _, row in df.iterrows() %}
+    <tr>
+      {% for col in df.columns %}
+      <td>{{ row[col] }}</td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

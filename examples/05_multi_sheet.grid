@@ -1,0 +1,129 @@
+--- meta ---
+name: "Multi-Sheet Budget Report"
+engine: python
+version: "1.0"
+description: "Department budgets with summary roll-up across sheets"
+tags: ["budget", "multi-sheet", "departments"]
+
+--- data:revenue ---
+Department,Q1,Q2,Q3,Q4
+Engineering,500000,520000,550000,580000
+Marketing,200000,220000,250000,280000
+Sales,350000,380000,400000,450000
+Operations,150000,155000,160000,170000
+
+--- data:expenses ---
+Department,Salaries,Cloud,Marketing_Spend,Travel,Other
+Engineering,1200000,180000,0,50000,30000
+Marketing,400000,20000,350000,80000,25000
+Sales,600000,15000,100000,120000,40000
+Operations,300000,50000,0,20000,60000
+
+--- compute ---
+def transform(sheets):
+    revenue = sheets['revenue']
+    expenses = sheets['expenses']
+
+    # Calculate total revenue per department
+    q_cols = ['Q1', 'Q2', 'Q3', 'Q4']
+    revenue['Annual_Revenue'] = revenue[q_cols].sum(axis=1)
+    revenue['Revenue_Growth'] = ((revenue['Q4'] - revenue['Q1']) / revenue['Q1'] * 100).round(1)
+
+    # Calculate total expenses per department
+    expense_cols = ['Salaries', 'Cloud', 'Marketing_Spend', 'Travel', 'Other']
+    expenses['Total_Expenses'] = expenses[expense_cols].sum(axis=1)
+
+    # Merge for profit calculation
+    merged = revenue[['Department', 'Annual_Revenue']].merge(
+        expenses[['Department', 'Total_Expenses']], on='Department'
+    )
+    merged['Net_Profit'] = merged['Annual_Revenue'] - merged['Total_Expenses']
+    merged['Margin'] = (merged['Net_Profit'] / merged['Annual_Revenue'] * 100).round(1)
+
+    sheets['revenue'] = revenue
+    sheets['expenses'] = expenses
+    sheets['summary'] = merged
+
+    return sheets
+
+def aggregates(df):
+    # df here is the first sheet (revenue)
+    return {
+        'total_annual_revenue': df['Annual_Revenue'].sum(),
+        'avg_growth': df['Revenue_Growth'].mean().round(1),
+        'top_department': df.loc[df['Annual_Revenue'].idxmax(), 'Department'],
+    }
+
+def conditional_formats():
+    return [
+        {'column': 'Revenue_Growth', 'rule': 'greater_than', 'value': 10, 'style': 'positive'},
+        {'column': 'Revenue_Growth', 'rule': 'less_than', 'value': 5, 'style': 'negative'},
+        {'column': 'Margin', 'rule': 'color_scale', 'value': -50, 'value2': 50,
+         'min_color': '#ef4444', 'max_color': '#10b981'},
+        {'column': 'Net_Profit', 'rule': 'less_than', 'value': 0, 'style': 'highlight-red'},
+    ]
+
+--- present ---
+<style>
+  .tabs { display: flex; gap: 0; margin-bottom: 1.5rem; border-bottom: 2px solid #e2e8f0; }
+  .tab { padding: 0.5rem 1.5rem; background: #f1f5f9; border: 1px solid #e2e8f0;
+         border-bottom: none; border-radius: 8px 8px 0 0; font-weight: 500; margin-bottom: -2px; }
+  .tab.active { background: white; border-bottom: 2px solid white; color: #2563eb; }
+</style>
+
+<h1>{{ meta.name }}</h1>
+
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="kpi-value">{{ format_currency(agg.total_annual_revenue) }}</div>
+    <div class="kpi-label">Total Revenue</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ format_pct(agg.avg_growth) }}</div>
+    <div class="kpi-label">Avg Growth</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.top_department }}</div>
+    <div class="kpi-label">Top Department</div>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active">Revenue</div>
+  <div class="tab">Expenses</div>
+  <div class="tab">Summary</div>
+</div>
+
+<h3>Revenue by Quarter</h3>
+<table>
+  <thead><tr><th>Department</th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>Annual</th><th>Growth</th></tr></thead>
+  <tbody>
+  {% for _, row in sheets['revenue'].iterrows() %}
+    <tr>
+      <td><strong>{{ row.Department }}</strong></td>
+      <td class="number">{{ format_currency(row.Q1) }}</td>
+      <td class="number">{{ format_currency(row.Q2) }}</td>
+      <td class="number">{{ format_currency(row.Q3) }}</td>
+      <td class="number">{{ format_currency(row.Q4) }}</td>
+      <td class="number"><strong>{{ format_currency(row.Annual_Revenue) }}</strong></td>
+      <td class="number {{ cond_class('Revenue_Growth', row.Revenue_Growth) }}">{{ format_pct(row.Revenue_Growth) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h3>Profit Summary</h3>
+<table>
+  <thead><tr><th>Department</th><th>Revenue</th><th>Expenses</th><th>Net Profit</th><th>Margin</th></tr></thead>
+  <tbody>
+  {% for _, row in sheets['summary'].iterrows() %}
+    <tr>
+      <td><strong>{{ row.Department }}</strong></td>
+      <td class="number">{{ format_currency(row.Annual_Revenue) }}</td>
+      <td class="number">{{ format_currency(row.Total_Expenses) }}</td>
+      <td class="number {{ cond_class('Net_Profit', row.Net_Profit) }}">{{ format_currency(row.Net_Profit) }}</td>
+      <td class="number" {{ cond_style('Margin', row.Margin) }}>{{ format_pct(row.Margin) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
