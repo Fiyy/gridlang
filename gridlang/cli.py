@@ -87,9 +87,11 @@ def main():
                                default='openpyxl', help='Excel write engine')
 
     # serve command
-    serve_parser = subparsers.add_parser('serve', help='Live preview server for .grid files')
+    serve_parser = subparsers.add_parser('serve', help='Live preview server or editor for .grid files')
     serve_parser.add_argument('file', type=str, help='Path to .grid file')
     serve_parser.add_argument('--port', type=int, default=8080, help='HTTP port (default: 8080)')
+    serve_parser.add_argument('--edit', action='store_true',
+                               help='Open editor UI with live preview (default: preview only)')
 
     args = parser.parse_args()
 
@@ -428,9 +430,9 @@ def cmd_export(args):
 
 
 def cmd_serve(args):
-    """Start live preview server."""
+    """Start live preview server or editor."""
     from gridlang.server import serve
-    serve(args.file, port=args.port)
+    serve(args.file, port=args.port, edit=args.edit)
 
 
 def _print_header(doc: GridDocument):
