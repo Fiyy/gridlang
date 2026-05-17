@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import os
 import json
+import base64
+import tempfile
 import traceback
 from pathlib import Path
 from http.server import HTTPServer, SimpleHTTPRequestHandler
@@ -25,6 +27,7 @@ from gridlang.parser import parse_string, parse_file, ParseError
 from gridlang.schema import parse_data
 from gridlang.runtime import execute
 from gridlang.renderer import render
+import pandas as pd
 
 
 class GridLangHandler(SimpleHTTPRequestHandler):
@@ -59,6 +62,14 @@ class GridLangHandler(SimpleHTTPRequestHandler):
             self._api_render_post()
         elif path == '/api/save':
             self._api_save()
+        elif path == '/api/import':
+            self._api_import()
+        elif path == '/api/export/xlsx':
+            self._api_export_xlsx()
+        elif path == '/api/export/csv':
+            self._api_export_csv()
+        elif path == '/api/cell-edit':
+            self._api_cell_edit()
         else:
             self.send_error(404)
 
@@ -108,15 +119,29 @@ class GridLangHandler(SimpleHTTPRequestHandler):
             self._send_json(200, {'html': None, 'error': str(e)})
 
     def _api_render_post(self):
-        """POST /api/render — render .grid content from request body, return HTML."""
+        """POST /api/render — render .grid content from request body, return HTML + data info."""
         try:
             body = self._read_body()
             data = json.loads(body)
             content = data.get('content', '')
-            html = self._render_from_string(content)
-            self._send_json(200, {'html': html, 'error': None})
+
+            doc = parse_string(content)
+            # Get raw data for editable table
+            raw_df = parse_data(doc.data_raw)
+            columns = raw_df.columns.tolist()
+            raw_rows = []
+            for _, row in raw_df.iterrows():
+                raw_rows.append({col: (None if pd.isna(row[col]) else row[col]) for col in columns})
+
+            html = self._render_doc(doc)
+            self._send_json(200, {
+                'html': html,
+                'error': None,
+                'columns': columns,
+                'raw_data': raw_rows,
+            })
         except Exception as e:
-            self._send_json(200, {'html': None, 'error': str(e)})
+            self._send_json(200, {'html': None, 'error': str(e), 'columns': [], 'raw_data': []})
 
     def _api_save(self):
         """POST /api/save — save .grid content to file."""
@@ -134,6 +159,175 @@ class GridLangHandler(SimpleHTTPRequestHandler):
             self._send_json(400, {'saved': False, 'error': f'Invalid .grid format: {e}'})
         except Exception as e:
             self._send_json(500, {'saved': False, 'error': str(e)})
+
+    def _api_import(self):
+        """POST /api/import — upload xlsx/csv file, return .grid content."""
+        try:
+            body = self._read_body()
+            data = json.loads(body)
+            filename = data.get('filename', 'upload.xlsx')
+            file_b64 = data.get('data', '')  # base64-encoded file content
+
+            file_bytes = base64.b64decode(file_b64)
+            suffix = Path(filename).suffix.lower()
+
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(file_bytes)
+                tmp_path = tmp.name
+
+            try:
+                if suffix == '.csv':
+                    from gridlang.csv_io import import_csv
+                    grid_content = import_csv(tmp_path)
+                elif suffix in ('.xlsx', '.xls'):
+                    from gridlang.excel_import import import_excel
+                    grid_content = import_excel(tmp_path)
+                else:
+                    self._send_json(400, {'error': f'Unsupported format: {suffix}'})
+                    return
+            finally:
+                os.unlink(tmp_path)
+
+            self._send_json(200, {'content': grid_content, 'filename': filename})
+        except Exception as e:
+            self._send_json(500, {'error': str(e)})
+
+    def _api_export_xlsx(self):
+        """POST /api/export/xlsx — render current .grid content and return xlsx as base64."""
+        try:
+            body = self._read_body()
+            data = json.loads(body)
+            content = data.get('content', '')
+
+            # Save to temp .grid file, then export
+            with tempfile.NamedTemporaryFile(suffix='.grid', mode='w', delete=False, encoding='utf-8') as tmp:
+                tmp.write(content)
+                grid_path = tmp.name
+
+            xlsx_path = grid_path + '.xlsx'
+            try:
+                from gridlang.excel_export import export_excel
+                export_excel(grid_path, xlsx_path)
+                with open(xlsx_path, 'rb') as f:
+                    xlsx_b64 = base64.b64encode(f.read()).decode('ascii')
+            finally:
+                os.unlink(grid_path)
+                if os.path.exists(xlsx_path):
+                    os.unlink(xlsx_path)
+
+            self._send_json(200, {'data': xlsx_b64, 'filename': 'export.xlsx'})
+        except Exception as e:
+            self._send_json(500, {'error': str(e)})
+
+    def _api_export_csv(self):
+        """POST /api/export/csv — render current .grid content and return csv string."""
+        try:
+            body = self._read_body()
+            data = json.loads(body)
+            content = data.get('content', '')
+
+            # Parse and execute
+            doc = parse_string(content)
+            if doc.is_multi_sheet:
+                sheets = {name: parse_data(raw) for name, raw in doc.sheets_raw.items()}
+                primary_df = list(sheets.values())[0]
+                result = execute(doc.compute_raw, primary_df, sheets=sheets)
+            else:
+                primary_df = parse_data(doc.data_raw)
+                result = execute(doc.compute_raw, primary_df)
+
+            csv_str = result.df.to_csv(index=False)
+            self._send_json(200, {'data': csv_str, 'filename': 'export.csv'})
+        except Exception as e:
+            self._send_json(500, {'error': str(e)})
+
+    def _api_cell_edit(self):
+        """POST /api/cell-edit — edit a cell in the data section, return updated .grid source."""
+        try:
+            body = self._read_body()
+            data = json.loads(body)
+            content = data.get('content', '')
+            row = data.get('row')          # 0-based data row index
+            col = data.get('col')          # column name
+            value = data.get('value', '')
+            sheet = data.get('sheet', None)  # for multi-sheet
+
+            doc = parse_string(content)
+
+            # Determine which raw data section to edit
+            if sheet and sheet in doc.sheets_raw:
+                raw_csv = doc.sheets_raw[sheet]
+            else:
+                raw_csv = doc.data_raw
+
+            # Parse CSV lines
+            csv_lines = raw_csv.strip().split('\n')
+            if len(csv_lines) < 2:
+                self._send_json(400, {'error': 'No data rows'})
+                return
+
+            headers = [h.strip() for h in csv_lines[0].split(',')]
+            if col not in headers:
+                self._send_json(400, {'error': f'Column "{col}" not found'})
+                return
+
+            col_idx = headers.index(col)
+            data_row_idx = row + 1  # +1 for header
+
+            if data_row_idx >= len(csv_lines):
+                self._send_json(400, {'error': f'Row {row} out of range'})
+                return
+
+            # Parse the target row, update the cell
+            row_parts = csv_lines[data_row_idx].split(',')
+            # Pad if needed
+            while len(row_parts) <= col_idx:
+                row_parts.append('')
+            row_parts[col_idx] = str(value)
+            csv_lines[data_row_idx] = ','.join(row_parts)
+
+            new_csv = '\n'.join(csv_lines)
+
+            # Rebuild the .grid source with updated data
+            new_content = self._replace_data_section(content, new_csv, sheet)
+
+            self._send_json(200, {'content': new_content})
+        except Exception as e:
+            self._send_json(500, {'error': str(e)})
+
+    @staticmethod
+    def _replace_data_section(content: str, new_csv: str, sheet: str = None) -> str:
+        """Replace the data section in .grid source with new CSV content."""
+        import re
+        lines = content.split('\n')
+
+        # Find the target data section
+        if sheet and sheet != 'default':
+            target = f'data:{sheet}'
+        else:
+            target = 'data'
+
+        # Find section boundaries
+        section_start = None
+        section_end = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if re.match(r'^---\s+' + re.escape(target) + r'\s+---$', stripped) or \
+               (target == 'data' and re.match(r'^---\s+data\s+---$', stripped)):
+                section_start = i + 1
+            elif section_start is not None and re.match(r'^---\s+\w', stripped):
+                section_end = i
+                break
+
+        if section_start is None:
+            return content
+
+        if section_end is None:
+            section_end = len(lines)
+
+        # Replace
+        new_lines = lines[:section_start] + [new_csv, ''] + lines[section_end:]
+        return '\n'.join(new_lines)
 
     # =========================================================================
     # Render Helpers
@@ -354,7 +548,28 @@ EDITOR_HTML = r"""<!DOCTYPE html>
   .pv-dot.g { background: var(--green); }
   .pv-dot.r { background: var(--red); }
   .pv-dot.y { background: var(--yellow); }
+  .pv-tabs { display: flex; gap: 0; margin-left: auto; }
+  .pv-tab {
+    padding: 3px 12px; font-size: 11px; cursor: pointer; color: #64748b;
+    border-bottom: 2px solid transparent;
+  }
+  .pv-tab.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
+  .pv-tab:hover { color: #1e40af; }
   #pv-frame { flex: 1; border: none; width: 100%; }
+  #pv-data { flex: 1; overflow: auto; display: none; padding: 0; }
+  #pv-data table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #pv-data th {
+    background: #1e40af; color: #fff; padding: 6px 10px; font-weight: 600;
+    text-align: left; font-size: 11px; position: sticky; top: 0; z-index: 1;
+  }
+  #pv-data td {
+    padding: 2px 4px; border: 1px solid #e2e8f0; cursor: cell; min-width: 70px;
+  }
+  #pv-data td:focus {
+    outline: 2px solid #3b82f6; outline-offset: -2px; background: #eff6ff;
+  }
+  #pv-data tr:hover td { background: #f8fafc; }
+  #pv-data td.edited { background: #fefce8; }
 
   /* ── Keyboard shortcut hint ── */
   .hint { position: fixed; bottom: 8px; right: 12px; font-size: 10px; color: #475569; }
@@ -369,8 +584,19 @@ EDITOR_HTML = r"""<!DOCTYPE html>
   <span class="fname" id="fname">loading...</span>
   <div class="sep"></div>
   <span class="st ok" id="status">Ready</span>
+  <button onclick="doImport()">Import</button>
+  <button onclick="showExportMenu()">Export ▾</button>
   <button onclick="doFormat()">Format</button>
   <button class="pri" onclick="doSave()">Save</button>
+</div>
+
+<!-- Hidden file input for import -->
+<input type="file" id="file-input" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleFileSelect(event)">
+
+<!-- Export dropdown -->
+<div id="export-menu" style="display:none; position:fixed; top:42px; right:80px; background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:4px 0; z-index:999; box-shadow:0 4px 12px rgba(0,0,0,0.3);">
+  <div style="padding:6px 16px; font-size:12px; cursor:pointer; color:var(--text);" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background=''" onclick="doExport('xlsx')">Export as Excel (.xlsx)</div>
+  <div style="padding:6px 16px; font-size:12px; cursor:pointer; color:var(--text);" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background=''" onclick="doExport('csv')">Export as CSV (.csv)</div>
 </div>
 
 <!-- Main -->
@@ -394,8 +620,13 @@ EDITOR_HTML = r"""<!DOCTYPE html>
     <div class="pv-bar">
       <div class="pv-dot g" id="dot"></div>
       <span id="pv-st">Preview</span>
+      <div class="pv-tabs">
+        <div class="pv-tab active" onclick="switchPvTab('render')">Render</div>
+        <div class="pv-tab" onclick="switchPvTab('data')">Data</div>
+      </div>
     </div>
     <iframe id="pv-frame" sandbox="allow-scripts"></iframe>
+    <div id="pv-data"></div>
   </div>
 </div>
 
@@ -523,6 +754,12 @@ async function doRender() {
     } else {
       dot.className = 'pv-dot g'; pvSt.textContent = 'Preview';
       errbox.classList.remove('vis');
+
+      // Store raw data for editable Data tab
+      lastColumns = d.columns || [];
+      lastRawData = d.raw_data || [];
+      if (currentPvTab === 'data') buildDataTable();
+
       const full = `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>
 *{box-sizing:border-box}
@@ -573,6 +810,99 @@ function doFormat() {
   setSt('ok','Formatted');
 }
 
+// ── Import ──
+function doImport() {
+  document.getElementById('file-input').click();
+}
+
+async function handleFileSelect(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  setSt('busy', 'Importing ' + file.name + '...');
+
+  const reader = new FileReader();
+  reader.onload = async function(ev) {
+    const b64 = btoa(new Uint8Array(ev.target.result).reduce((s, b) => s + String.fromCharCode(b), ''));
+    try {
+      const r = await fetch('/api/import', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ filename: file.name, data: b64 }),
+      });
+      const d = await r.json();
+      if (d.error) {
+        setSt('err', d.error);
+      } else {
+        ed.value = d.content;
+        syncAll();
+        doRender();
+        setSt('ok', 'Imported ' + file.name);
+      }
+    } catch(err) {
+      setSt('err', 'Import failed');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value = ''; // Reset so same file can be re-imported
+}
+
+// ── Export ──
+let exportMenuVisible = false;
+function showExportMenu() {
+  const menu = document.getElementById('export-menu');
+  exportMenuVisible = !exportMenuVisible;
+  menu.style.display = exportMenuVisible ? 'block' : 'none';
+}
+// Close menu on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#export-menu') && !e.target.closest('[onclick*="showExportMenu"]')) {
+    document.getElementById('export-menu').style.display = 'none';
+    exportMenuVisible = false;
+  }
+});
+
+async function doExport(fmt) {
+  document.getElementById('export-menu').style.display = 'none';
+  exportMenuVisible = false;
+  setSt('busy', 'Exporting as ' + fmt + '...');
+
+  try {
+    const r = await fetch('/api/export/' + fmt, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ content: ed.value }),
+    });
+    const d = await r.json();
+    if (d.error) {
+      setSt('err', d.error);
+      return;
+    }
+
+    // Trigger download
+    if (fmt === 'csv') {
+      const blob = new Blob([d.data], { type: 'text/csv' });
+      downloadBlob(blob, d.filename);
+    } else {
+      const bytes = Uint8Array.from(atob(d.data), c => c.charCodeAt(0));
+      const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      downloadBlob(blob, d.filename);
+    }
+    setSt('ok', 'Exported ' + d.filename);
+  } catch(err) {
+    setSt('err', 'Export failed');
+  }
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // ── UI helpers ──
 function setSt(t, msg) {
   const el = document.getElementById('status');
@@ -585,6 +915,92 @@ function updMod() {
   const el = document.getElementById('fname');
   const base = el.textContent.replace(/ •$/, '');
   el.textContent = (ed.value !== saved) ? base + ' •' : base;
+}
+
+// ── Preview Tabs (Render / Data) ──
+let currentPvTab = 'render';
+let lastRawData = [];
+let lastColumns = [];
+
+function switchPvTab(tab) {
+  currentPvTab = tab;
+  document.querySelectorAll('.pv-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.pv-tab[onclick*="${tab}"]`).classList.add('active');
+  document.getElementById('pv-frame').style.display = tab === 'render' ? 'block' : 'none';
+  document.getElementById('pv-data').style.display = tab === 'data' ? 'block' : 'none';
+  if (tab === 'data') buildDataTable();
+}
+
+function buildDataTable() {
+  const container = document.getElementById('pv-data');
+  if (!lastColumns.length) {
+    container.innerHTML = '<div style="padding:2rem;color:#94a3b8;text-align:center;">No data</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th style="width:36px;text-align:center;background:#374151;">#</th>';
+  lastColumns.forEach(c => { html += `<th>${c}</th>`; });
+  html += '</tr></thead><tbody>';
+  lastRawData.forEach((row, ri) => {
+    html += `<tr><td style="text-align:center;color:#94a3b8;background:#f9fafb;font-size:11px;cursor:default;">${ri+1}</td>`;
+    lastColumns.forEach(col => {
+      const val = row[col] !== null && row[col] !== undefined ? row[col] : '';
+      html += `<td contenteditable="true" data-row="${ri}" data-col="${col}" `
+            + `onblur="onCellBlur(this)" onkeydown="onCellKey(event,this)">${val}</td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function onCellKey(e, td) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    td.blur();
+  }
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const next = e.shiftKey ? td.previousElementSibling : td.nextElementSibling;
+    if (next && next.contentEditable === 'true') next.focus();
+  }
+  if (e.key === 'Escape') {
+    td.blur();
+  }
+}
+
+async function onCellBlur(td) {
+  const row = parseInt(td.dataset.row);
+  const col = td.dataset.col;
+  const newVal = td.textContent.trim();
+
+  // Check if value changed
+  const oldVal = lastRawData[row] ? String(lastRawData[row][col] ?? '') : '';
+  if (newVal === oldVal) return;
+
+  td.classList.add('edited');
+  setSt('busy', 'Updating...');
+
+  try {
+    const r = await fetch('/api/cell-edit', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ content: ed.value, row, col, value: newVal }),
+    });
+    const d = await r.json();
+    if (d.error) {
+      setSt('err', d.error);
+      return;
+    }
+    // Update source editor
+    ed.value = d.content;
+    syncAll();
+    updMod();
+    // Re-render preview
+    doRender();
+    setSt('ok', `Cell ${col}[${row+1}] updated`);
+  } catch(err) {
+    setSt('err', 'Cell update failed');
+  }
 }
 
 // ── Resize ──
