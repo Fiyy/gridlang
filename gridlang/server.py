@@ -235,7 +235,7 @@ def _error_page(message: str) -> str:
 
 
 # =============================================================================
-# Editor HTML — Full single-page editor with Monaco + live preview
+# Editor HTML — Fully self-contained, zero external dependencies
 # =============================================================================
 
 EDITOR_HTML = r"""<!DOCTYPE html>
@@ -247,379 +247,365 @@ EDITOR_HTML = r"""<!DOCTYPE html>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
-    --bg: #0f172a; --bg-panel: #1e293b; --border: #334155;
-    --text: #e2e8f0; --text-dim: #94a3b8; --accent: #3b82f6;
-    --accent-hover: #2563eb; --success: #10b981; --error: #ef4444;
-    --toolbar-h: 44px;
+    --bg: #0f172a; --bg2: #1e293b; --bg3: #283548; --border: #334155;
+    --text: #e2e8f0; --dim: #94a3b8; --accent: #3b82f6;
+    --green: #10b981; --red: #ef4444; --yellow: #f59e0b;
+    --bar-h: 42px; --tab-h: 30px;
   }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
          background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
 
-  /* Toolbar */
-  .toolbar {
-    height: var(--toolbar-h); background: var(--bg-panel); border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; padding: 0 16px; gap: 12px; z-index: 100;
+  /* ── Toolbar ── */
+  .bar {
+    height: var(--bar-h); background: var(--bg2); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 14px; gap: 10px;
   }
-  .toolbar .logo { font-weight: 700; font-size: 14px; color: var(--accent); letter-spacing: -0.5px; }
-  .toolbar .filename { font-size: 13px; color: var(--text-dim); }
-  .toolbar .spacer { flex: 1; }
-  .toolbar button {
-    padding: 5px 14px; border-radius: 6px; border: 1px solid var(--border);
+  .bar .logo { font-weight: 700; font-size: 14px; color: var(--accent); }
+  .bar .fname { font-size: 12px; color: var(--dim); }
+  .bar .sep { flex: 1; }
+  .bar .st {
+    font-size: 11px; padding: 2px 10px; border-radius: 3px; font-weight: 500;
+  }
+  .bar .st.ok { background: #064e3b; color: #6ee7b7; }
+  .bar .st.err { background: #7f1d1d; color: #fca5a5; }
+  .bar .st.busy { background: #1e3a5f; color: #93c5fd; }
+  .bar button {
+    padding: 4px 12px; border-radius: 5px; border: 1px solid var(--border);
     background: var(--bg); color: var(--text); font-size: 12px; cursor: pointer;
-    transition: all 0.15s;
   }
-  .toolbar button:hover { background: var(--border); }
-  .toolbar button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .toolbar button.primary:hover { background: var(--accent-hover); }
-  .toolbar .status { font-size: 11px; padding: 3px 10px; border-radius: 4px; }
-  .toolbar .status.ok { background: #064e3b; color: #6ee7b7; }
-  .toolbar .status.err { background: #7f1d1d; color: #fca5a5; }
-  .toolbar .status.saving { background: #1e3a5f; color: #93c5fd; }
+  .bar button:hover { background: var(--bg3); }
+  .bar button.pri { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .bar button.pri:hover { background: #2563eb; }
 
-  /* Main layout */
-  .main { display: flex; height: calc(100vh - var(--toolbar-h)); }
+  /* ── Layout ── */
+  .main { display: flex; height: calc(100vh - var(--bar-h)); }
 
-  /* Editor pane */
-  .editor-pane {
-    width: 50%; min-width: 300px; display: flex; flex-direction: column;
-    border-right: 2px solid var(--border);
+  /* ── Editor Pane ── */
+  .ed-pane {
+    width: 50%; min-width: 250px; display: flex; flex-direction: column;
+    border-right: 2px solid var(--border); position: relative;
   }
-  .editor-tabs {
-    height: 32px; background: var(--bg); display: flex; align-items: center;
-    border-bottom: 1px solid var(--border); padding: 0 8px; gap: 4px;
+  .ed-tabs {
+    height: var(--tab-h); background: var(--bg); display: flex; align-items: center;
+    padding: 0 8px; border-bottom: 1px solid var(--border);
   }
-  .editor-tab {
-    padding: 4px 12px; font-size: 11px; border-radius: 4px 4px 0 0; cursor: pointer;
-    color: var(--text-dim); border: 1px solid transparent; border-bottom: none;
+  .ed-tab {
+    padding: 3px 10px; font-size: 11px; background: var(--bg2); color: var(--dim);
+    border-radius: 3px 3px 0 0; border: 1px solid var(--border); border-bottom: none;
   }
-  .editor-tab.active { background: var(--bg-panel); color: var(--text); border-color: var(--border); }
-  #editor-container { flex: 1; }
+  .ed-tab.active { color: var(--text); }
 
-  /* Preview pane */
-  .preview-pane { flex: 1; display: flex; flex-direction: column; background: #fff; }
-  .preview-header {
-    height: 32px; background: #f8fafc; border-bottom: 1px solid #e2e8f0;
-    display: flex; align-items: center; padding: 0 12px; gap: 8px;
+  /* Editor wrapper with line numbers */
+  .ed-wrap { flex: 1; display: flex; overflow: hidden; position: relative; }
+  .ed-lines {
+    width: 44px; background: var(--bg); color: #475569; font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    text-align: right; padding: 10px 6px 10px 0; overflow: hidden; user-select: none;
+    border-right: 1px solid var(--border);
   }
-  .preview-header span { font-size: 11px; color: #64748b; }
-  .preview-header .dot { width: 8px; height: 8px; border-radius: 50%; }
-  .preview-header .dot.green { background: #10b981; }
-  .preview-header .dot.red { background: #ef4444; }
-  .preview-header .dot.yellow { background: #f59e0b; }
-  #preview-frame { flex: 1; border: none; width: 100%; }
+  .ed-input {
+    flex: 1; background: var(--bg); color: var(--text); border: none; outline: none; resize: none;
+    font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    padding: 10px 12px; tab-size: 4; white-space: pre; overflow: auto;
+  }
+  .ed-input::selection { background: rgba(59,130,246,0.3); }
 
-  /* Error overlay */
-  .error-panel {
-    display: none; background: #1c1917; color: #fca5a5; padding: 12px 16px;
-    font-family: monospace; font-size: 12px; max-height: 120px; overflow-y: auto;
-    border-top: 2px solid var(--error);
+  /* Syntax-highlighted overlay */
+  .ed-highlight {
+    position: absolute; top: 0; left: 45px; right: 0; bottom: 0;
+    pointer-events: none; overflow: hidden;
+    font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    padding: 10px 12px; white-space: pre; tab-size: 4; color: transparent;
   }
-  .error-panel.visible { display: block; }
+  .ed-highlight .sec { color: #c084fc; font-weight: 700; }
+  .ed-highlight .kw { color: #c084fc; }
+  .ed-highlight .fn { color: #22d3ee; }
+  .ed-highlight .xl { color: #fbbf24; }
+  .ed-highlight .str { color: #86efac; }
+  .ed-highlight .num { color: #f97316; }
+  .ed-highlight .cmt { color: #64748b; font-style: italic; }
+  .ed-highlight .tag { color: #818cf8; }
+  .ed-highlight .j2e { color: #fb923c; }
+  .ed-highlight .j2b { color: #f472b6; }
+  .ed-highlight .var { color: #67e8f9; }
+  .ed-highlight .meta-key { color: #38bdf8; }
 
-  /* Resize handle */
-  .resize-handle {
-    width: 4px; cursor: col-resize; background: transparent; transition: background 0.15s;
-    position: relative; z-index: 10;
+  /* Error panel */
+  .err-box {
+    display: none; background: #1c1917; color: #fca5a5; padding: 8px 14px;
+    font: 12px/18px monospace; max-height: 100px; overflow-y: auto;
+    border-top: 2px solid var(--red);
   }
-  .resize-handle:hover, .resize-handle.dragging { background: var(--accent); }
+  .err-box.vis { display: block; }
+
+  /* ── Resize Handle ── */
+  .resizer {
+    width: 5px; cursor: col-resize; background: transparent; z-index: 10;
+  }
+  .resizer:hover, .resizer.on { background: var(--accent); }
+
+  /* ── Preview Pane ── */
+  .pv-pane { flex: 1; display: flex; flex-direction: column; background: #fff; }
+  .pv-bar {
+    height: var(--tab-h); background: #f8fafc; border-bottom: 1px solid #e2e8f0;
+    display: flex; align-items: center; padding: 0 10px; gap: 6px;
+  }
+  .pv-bar span { font-size: 11px; color: #64748b; }
+  .pv-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .pv-dot.g { background: var(--green); }
+  .pv-dot.r { background: var(--red); }
+  .pv-dot.y { background: var(--yellow); }
+  #pv-frame { flex: 1; border: none; width: 100%; }
+
+  /* ── Keyboard shortcut hint ── */
+  .hint { position: fixed; bottom: 8px; right: 12px; font-size: 10px; color: #475569; }
+  .hint kbd { background: #1e293b; padding: 1px 5px; border-radius: 3px; border: 1px solid #334155; }
 </style>
 </head>
 <body>
 
 <!-- Toolbar -->
-<div class="toolbar">
+<div class="bar">
   <span class="logo">GridLang</span>
-  <span class="filename" id="filename">loading...</span>
-  <div class="spacer"></div>
-  <span class="status ok" id="status">Ready</span>
-  <button onclick="formatCode()">Format</button>
-  <button class="primary" onclick="saveFile()">Save</button>
+  <span class="fname" id="fname">loading...</span>
+  <div class="sep"></div>
+  <span class="st ok" id="status">Ready</span>
+  <button onclick="doFormat()">Format</button>
+  <button class="pri" onclick="doSave()">Save</button>
 </div>
 
 <!-- Main -->
 <div class="main">
   <!-- Editor -->
-  <div class="editor-pane" id="editor-pane">
-    <div class="editor-tabs">
-      <div class="editor-tab active">Source</div>
+  <div class="ed-pane" id="ed-pane">
+    <div class="ed-tabs"><div class="ed-tab active">Source</div></div>
+    <div class="ed-wrap">
+      <div class="ed-lines" id="lines">1</div>
+      <div class="ed-highlight" id="highlight"></div>
+      <textarea class="ed-input" id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
     </div>
-    <div id="editor-container"></div>
-    <div class="error-panel" id="error-panel"></div>
+    <div class="err-box" id="errbox"></div>
   </div>
 
-  <!-- Resize handle -->
-  <div class="resize-handle" id="resize-handle"></div>
+  <!-- Resize -->
+  <div class="resizer" id="resizer"></div>
 
   <!-- Preview -->
-  <div class="preview-pane">
-    <div class="preview-header">
-      <div class="dot green" id="preview-dot"></div>
-      <span id="preview-status">Preview</span>
+  <div class="pv-pane">
+    <div class="pv-bar">
+      <div class="pv-dot g" id="dot"></div>
+      <span id="pv-st">Preview</span>
     </div>
-    <iframe id="preview-frame" sandbox="allow-scripts allow-same-origin"></iframe>
+    <iframe id="pv-frame" sandbox="allow-scripts"></iframe>
   </div>
 </div>
 
-<!-- Monaco Editor (from CDN) -->
-<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+<div class="hint"><kbd>Ctrl</kbd>+<kbd>S</kbd> save &nbsp; Edits auto-preview in 600ms</div>
+
 <script>
-// ==========================================================================
 // State
-// ==========================================================================
-let editor = null;
-let renderTimeout = null;
-let lastSavedContent = '';
-const RENDER_DELAY = 600; // ms debounce
+const ed = document.getElementById('editor');
+const hl = document.getElementById('highlight');
+const lines = document.getElementById('lines');
+const errbox = document.getElementById('errbox');
+const dot = document.getElementById('dot');
+const pvSt = document.getElementById('pv-st');
+let saved = '';
+let timer = null;
 
-// ==========================================================================
-// Initialize Monaco Editor
-// ==========================================================================
-require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' } });
-
-require(['vs/editor/editor.main'], function () {
-  // Register .grid language
-  monaco.languages.register({ id: 'gridlang' });
-  monaco.languages.setMonarchTokensProvider('gridlang', {
-    tokenizer: {
-      root: [
-        [/^---\s+\w+[\w:]*\s+---\s*$/, 'keyword'],           // section delimiters
-        [/^(name|engine|version|description|author|tags|schema|dependencies)\s*:/, 'type'],  // meta keys
-        [/"[^"]*"/, 'string'],
-        [/'[^']*'/, 'string'],
-        [/\b(def|return|if|elif|else|for|in|import|from|as|not|and|or|True|False|None|pass|lambda)\b/, 'keyword'],
-        [/\b(transform|aggregates|validate|conditional_formats)\b/, 'type.identifier'],
-        [/\b(SUMIF|COUNTIF|VLOOKUP|XLOOKUP|HLOOKUP|PIVOT|GROUPBY|SORT|FILTER|IF|IFS|SWITCH|ROUND|ABS|LEFT|RIGHT|MID|UPPER|LOWER|TRIM|YEAR|MONTH|DAY|CONCATENATE|RANK|PERCENTILE|MEDIAN|STDEV|UNIQUE|TRANSPOSE|IFERROR|AVERAGEIF|SUMIFS|COUNTIFS|INDEX|MATCH|TODAY|NOW|LEN|SUBSTITUTE|PROPER|TEXT|DATEDIF|NETWORKDAYS|EDATE|WEEKDAY|MOD|POWER|CEILING|FLOOR|ROUNDUP|ROUNDDOWN|AND|OR|NOT|SMALL|LARGE|QUARTILE|VAR)\b/, 'support.function'],
-        [/\b(pd|np|df|sheets|agg|meta|raw_df)\b/, 'variable'],
-        [/#.*$/, 'comment'],
-        [/\b\d+\.?\d*\b/, 'number'],
-        [/<\/?[\w-]+/, 'tag'],                                   // HTML tags
-        [/\{\{.*?\}\}/, 'string.escape'],                        // Jinja2 expressions
-        [/\{%.*?%\}/, 'keyword.control'],                        // Jinja2 blocks
-      ]
-    }
-  });
-
-  // Define editor theme
-  monaco.editor.defineTheme('gridlang-dark', {
-    base: 'vs-dark',
-    inherit: true,
-    rules: [
-      { token: 'keyword', foreground: 'c084fc' },
-      { token: 'type', foreground: '38bdf8' },
-      { token: 'type.identifier', foreground: '22d3ee' },
-      { token: 'support.function', foreground: 'fbbf24' },
-      { token: 'string', foreground: '86efac' },
-      { token: 'string.escape', foreground: 'fb923c' },
-      { token: 'keyword.control', foreground: 'f472b6' },
-      { token: 'comment', foreground: '64748b' },
-      { token: 'number', foreground: 'f97316' },
-      { token: 'variable', foreground: '67e8f9' },
-      { token: 'tag', foreground: '818cf8' },
-    ],
-    colors: {
-      'editor.background': '#0f172a',
-      'editor.lineHighlightBackground': '#1e293b',
-      'editorGutter.background': '#0f172a',
-      'editorLineNumber.foreground': '#475569',
-    }
-  });
-
-  // Create editor
-  editor = monaco.editor.create(document.getElementById('editor-container'), {
-    language: 'gridlang',
-    theme: 'gridlang-dark',
-    fontSize: 13,
-    lineHeight: 20,
-    minimap: { enabled: false },
-    scrollBeyondLastLine: false,
-    padding: { top: 8, bottom: 8 },
-    automaticLayout: true,
-    tabSize: 4,
-    wordWrap: 'on',
-    renderLineHighlight: 'line',
-    smoothScrolling: true,
-    cursorSmoothCaretAnimation: 'on',
-    bracketPairColorization: { enabled: true },
-  });
-
-  // Live preview on content change
-  editor.onDidChangeModelContent(() => {
-    clearTimeout(renderTimeout);
-    renderTimeout = setTimeout(renderPreview, RENDER_DELAY);
-    updateModifiedState();
-  });
-
-  // Ctrl+S to save
-  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, saveFile);
-
-  // Load file content
-  loadFile();
+// ── Load file ──
+fetch('/api/source').then(r=>r.json()).then(d => {
+  document.getElementById('fname').textContent = d.filename;
+  saved = d.content;
+  ed.value = d.content;
+  syncAll();
+  doRender();
 });
 
-// ==========================================================================
-// API calls
-// ==========================================================================
+// ── Editor events ──
+ed.addEventListener('input', () => {
+  syncAll();
+  clearTimeout(timer);
+  timer = setTimeout(doRender, 600);
+  updMod();
+});
+ed.addEventListener('scroll', syncScroll);
+ed.addEventListener('keydown', handleTab);
 
-async function loadFile() {
-  try {
-    const resp = await fetch('/api/source');
-    const data = await resp.json();
-    document.getElementById('filename').textContent = data.filename;
-    lastSavedContent = data.content;
-    if (editor) {
-      editor.setValue(data.content);
-      // Initial render
-      setTimeout(renderPreview, 200);
-    }
-  } catch (e) {
-    setStatus('err', 'Load failed');
+function syncAll() { syncLines(); syncHighlight(); syncScroll(); }
+
+function syncScroll() {
+  hl.scrollTop = ed.scrollTop;
+  hl.scrollLeft = ed.scrollLeft;
+  lines.scrollTop = ed.scrollTop;
+}
+
+function syncLines() {
+  const n = ed.value.split('\n').length;
+  const arr = [];
+  for (let i = 1; i <= n; i++) arr.push(i);
+  lines.textContent = arr.join('\n');
+}
+
+function handleTab(e) {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const s = ed.selectionStart, en = ed.selectionEnd;
+    ed.value = ed.value.substring(0, s) + '    ' + ed.value.substring(en);
+    ed.selectionStart = ed.selectionEnd = s + 4;
+    syncAll();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault();
+    doSave();
   }
 }
 
-async function renderPreview() {
-  const content = editor.getValue();
-  const dot = document.getElementById('preview-dot');
-  const previewStatus = document.getElementById('preview-status');
-  const errorPanel = document.getElementById('error-panel');
+// ── Syntax highlighting ──
+function syncHighlight() {
+  const text = ed.value;
+  let html = escHtml(text);
 
-  dot.className = 'dot yellow';
-  previewStatus.textContent = 'Rendering...';
+  // Section delimiters
+  html = html.replace(/^(---\s+[\w:]+\s+---)$/gm, '<span class="sec">$1</span>');
 
+  // Meta keys
+  html = html.replace(/^((?:name|engine|version|description|author|tags|dependencies|schema|import_date|imported_from|sheets)\s*:)/gm, '<span class="meta-key">$1</span>');
+
+  // Python keywords
+  html = html.replace(/\b(def|return|if|elif|else|for|in|import|from|as|not|and|or|True|False|None|pass|lambda|class|try|except|raise|with|yield|while|break|continue)\b/g, '<span class="kw">$1</span>');
+
+  // GridLang function names
+  html = html.replace(/\b(transform|aggregates|validate|conditional_formats)\b/g, '<span class="fn">$1</span>');
+
+  // Excel formula names
+  html = html.replace(/\b(SUMIF|COUNTIF|VLOOKUP|XLOOKUP|HLOOKUP|PIVOT|GROUPBY|SORT|FILTER|IF|IFS|SWITCH|ROUND|ABS|LEFT|RIGHT|MID|UPPER|LOWER|TRIM|YEAR|MONTH|DAY|CONCATENATE|RANK|PERCENTILE|MEDIAN|STDEV|UNIQUE|TRANSPOSE|IFERROR|AVERAGEIF|SUMIFS|COUNTIFS|INDEX|MATCH|TODAY|NOW|LEN|SUBSTITUTE|PROPER|TEXT|DATEDIF|NETWORKDAYS|MOD|POWER|CEILING|FLOOR|ROUNDUP|ROUNDDOWN|AND|OR|NOT|SMALL|LARGE|QUARTILE|VAR|EDATE|WEEKDAY)\b/g, '<span class="xl">$1</span>');
+
+  // Built-in variables
+  html = html.replace(/\b(pd|np|df|sheets|agg|meta|raw_df)\b/g, '<span class="var">$1</span>');
+
+  // Strings (simple — double and single quoted)
+  html = html.replace(/(&quot;[^&]*?&quot;|&#x27;[^&]*?&#x27;)/g, '<span class="str">$1</span>');
+
+  // Numbers
+  html = html.replace(/\b(\d+\.?\d*)\b/g, '<span class="num">$1</span>');
+
+  // Comments
+  html = html.replace(/(#[^\n]*)/g, '<span class="cmt">$1</span>');
+
+  // Jinja2
+  html = html.replace(/(\{\{.*?\}\})/g, '<span class="j2e">$1</span>');
+  html = html.replace(/(\{%.*?%\})/g, '<span class="j2b">$1</span>');
+
+  // HTML tags
+  html = html.replace(/(&lt;\/?[\w-]+)/g, '<span class="tag">$1</span>');
+
+  hl.innerHTML = html + '\n';
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+}
+
+// ── Render preview ──
+async function doRender() {
+  dot.className = 'pv-dot y';
+  pvSt.textContent = 'Rendering...';
   try {
-    const resp = await fetch('/api/render', {
+    const r = await fetch('/api/render', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({content: ed.value}),
     });
-    const data = await resp.json();
-
-    if (data.error) {
-      dot.className = 'dot red';
-      previewStatus.textContent = 'Error';
-      errorPanel.textContent = data.error;
-      errorPanel.classList.add('visible');
+    const d = await r.json();
+    if (d.error) {
+      dot.className = 'pv-dot r'; pvSt.textContent = 'Error';
+      errbox.textContent = d.error; errbox.classList.add('vis');
     } else {
-      dot.className = 'dot green';
-      previewStatus.textContent = 'Preview';
-      errorPanel.classList.remove('visible');
-
-      // Wrap in full HTML with base styles
-      const fullHtml = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>
-* { box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-       line-height: 1.6; color: #1a1a1a; max-width: 1000px; margin: 0 auto; padding: 1.5rem; }
-h1, h2, h3 { color: #111827; }
-table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.85rem; }
-th { background: #f1f5f9; color: #374151; font-weight: 600; text-align: left;
-     padding: 0.6rem; border-bottom: 2px solid #e2e8f0; position: sticky; top: 0; }
-td { padding: 0.6rem; border-bottom: 1px solid #f1f5f9; }
-tr:hover { background: #f8fafc; }
-.number { text-align: right; font-variant-numeric: tabular-nums; }
-.positive { color: #059669; } .negative { color: #dc2626; }
-.highlight-red { background-color: #fef2f2; color: #991b1b; }
-.highlight-green { background-color: #ecfdf5; color: #065f46; }
-.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.8rem; margin: 1rem 0; }
-.kpi { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 1rem; text-align: center; }
-.kpi-value { font-size: 1.5rem; font-weight: 700; color: #2563eb; }
-.kpi-label { font-size: 0.8rem; color: #64748b; margin-top: 0.2rem; }
-</style></head><body>${data.html}</body></html>`;
-
-      const frame = document.getElementById('preview-frame');
-      frame.srcdoc = fullHtml;
+      dot.className = 'pv-dot g'; pvSt.textContent = 'Preview';
+      errbox.classList.remove('vis');
+      const full = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.6;color:#1a1a1a;max-width:980px;margin:0 auto;padding:1.2rem}
+h1,h2,h3{color:#111827}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.85rem}
+th{background:#f1f5f9;color:#374151;font-weight:600;text-align:left;padding:.55rem;border-bottom:2px solid #e2e8f0;position:sticky;top:0}
+td{padding:.55rem;border-bottom:1px solid #f1f5f9}
+tr:hover{background:#f8fafc}
+.number{text-align:right;font-variant-numeric:tabular-nums}
+.positive{color:#059669}.negative{color:#dc2626}
+.highlight-red{background:#fef2f2;color:#991b1b}
+.highlight-green{background:#ecfdf5;color:#065f46}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.7rem;margin:1rem 0}
+.kpi{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:.9rem;text-align:center}
+.kpi-value{font-size:1.4rem;font-weight:700;color:#2563eb}
+.kpi-label{font-size:.78rem;color:#64748b;margin-top:.15rem}
+</style></head><body>${d.html}</body></html>`;
+      document.getElementById('pv-frame').srcdoc = full;
     }
-  } catch (e) {
-    dot.className = 'dot red';
-    previewStatus.textContent = 'Connection error';
+  } catch(e) {
+    dot.className = 'pv-dot r'; pvSt.textContent = 'Connection error';
   }
 }
 
-async function saveFile() {
-  const content = editor.getValue();
-  setStatus('saving', 'Saving...');
-
+// ── Save ──
+async function doSave() {
+  setSt('busy','Saving...');
   try {
-    const resp = await fetch('/api/save', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+    const r = await fetch('/api/save', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({content: ed.value}),
     });
-    const data = await resp.json();
-
-    if (data.saved) {
-      lastSavedContent = content;
-      setStatus('ok', 'Saved');
-      updateModifiedState();
-    } else {
-      setStatus('err', data.error || 'Save failed');
-    }
-  } catch (e) {
-    setStatus('err', 'Save failed');
-  }
+    const d = await r.json();
+    if (d.saved) { saved = ed.value; setSt('ok','Saved'); updMod(); }
+    else { setSt('err', d.error || 'Failed'); }
+  } catch(e) { setSt('err','Save failed'); }
 }
 
-function formatCode() {
-  if (!editor) return;
-  // Simple auto-format: ensure sections have blank lines around them
-  let content = editor.getValue();
-  content = content.replace(/\n*(---\s+\w[\w:]*\s+---)\n*/g, '\n\n$1\n');
-  content = content.trim() + '\n';
-  editor.setValue(content);
-  setStatus('ok', 'Formatted');
+// ── Format ──
+function doFormat() {
+  let v = ed.value;
+  v = v.replace(/\n*(---\s+[\w:]+\s+---)\n*/g, '\n\n$1\n');
+  v = v.trim() + '\n';
+  ed.value = v;
+  syncAll();
+  doRender();
+  setSt('ok','Formatted');
 }
 
-// ==========================================================================
-// UI Helpers
-// ==========================================================================
-
-function setStatus(type, text) {
+// ── UI helpers ──
+function setSt(t, msg) {
   const el = document.getElementById('status');
-  el.className = 'status ' + type;
-  el.textContent = text;
-  if (type === 'ok' || type === 'saving') {
-    setTimeout(() => {
-      if (el.textContent === text) {
-        el.className = 'status ok';
-        el.textContent = 'Ready';
-      }
-    }, 2000);
-  }
+  el.className = 'st ' + t;
+  el.textContent = msg;
+  if (t !== 'err') setTimeout(() => { if(el.textContent===msg){el.className='st ok';el.textContent='Ready';} }, 2000);
 }
 
-function updateModifiedState() {
-  const filename = document.getElementById('filename');
-  const isModified = editor && editor.getValue() !== lastSavedContent;
-  const baseName = filename.textContent.replace(/ •$/, '');
-  filename.textContent = isModified ? baseName + ' •' : baseName;
+function updMod() {
+  const el = document.getElementById('fname');
+  const base = el.textContent.replace(/ •$/, '');
+  el.textContent = (ed.value !== saved) ? base + ' •' : base;
 }
 
-// ==========================================================================
-// Resize Handle
-// ==========================================================================
-(function () {
-  const handle = document.getElementById('resize-handle');
-  const editorPane = document.getElementById('editor-pane');
-  let isDragging = false;
-
-  handle.addEventListener('mousedown', (e) => {
-    isDragging = true;
-    handle.classList.add('dragging');
+// ── Resize ──
+(function(){
+  const h = document.getElementById('resizer');
+  const p = document.getElementById('ed-pane');
+  let on = false;
+  h.addEventListener('mousedown', e => {
+    on = true; h.classList.add('on');
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     e.preventDefault();
   });
-
-  document.addEventListener('mousemove', (e) => {
-    if (!isDragging) return;
-    const pct = (e.clientX / window.innerWidth) * 100;
-    const clamped = Math.max(20, Math.min(80, pct));
-    editorPane.style.width = clamped + '%';
+  document.addEventListener('mousemove', e => {
+    if(!on) return;
+    const pct = Math.max(20, Math.min(80, e.clientX / window.innerWidth * 100));
+    p.style.width = pct + '%';
   });
-
   document.addEventListener('mouseup', () => {
-    if (!isDragging) return;
-    isDragging = false;
-    handle.classList.remove('dragging');
+    if(!on) return;
+    on = false; h.classList.remove('on');
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
   });
