@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "report": "Q1 2026 Regional Sales",
+    "currency": "USD",
+    "generated_at": "2026-04-01T08:00:00Z"
+  },
+  "data": {
+    "records": [
+      {"Region": "North",  "Q1_Revenue": 184500, "Q1_Orders": 412, "Top_Product": "Widget Pro"},
+      {"Region": "South",  "Q1_Revenue": 142800, "Q1_Orders": 358, "Top_Product": "Gadget X"},
+      {"Region": "East",   "Q1_Revenue":  98200, "Q1_Orders": 245, "Top_Product": "Sensor V2"},
+      {"Region": "West",   "Q1_Revenue": 167400, "Q1_Orders": 389, "Top_Product": "Power Hub"},
+      {"Region": "Central","Q1_Revenue": 121000, "Q1_Orders": 295, "Top_Product": "Tool Master"}
+    ]
+  }
+}

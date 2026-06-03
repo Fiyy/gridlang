@@ -1,0 +1,96 @@
+--- meta ---
+name: "Remote Data Demo"
+engine: python
+version: "1.0"
+description: "Fetch a JSON dataset via @source, drill into it with @select, and analyze."
+
+--- data ---
+@source: file://./examples/fixtures/q1_sales.json
+@format: json
+@select: data.records
+@cache: 1h
+
+# Inline fallback used when the source is unavailable or http(s) is denied
+# without --allow-remote. Match the columns produced by @select for consistency.
+Region,Q1_Revenue,Q1_Orders,Top_Product
+North,180000,400,Widget
+South,140000,350,Gadget
+East,95000,240,Sensor
+West,165000,385,Hub
+
+--- compute ---
+def transform(df):
+    df['Avg_Order_Value'] = (df['Q1_Revenue'] / df['Q1_Orders']).round(0).astype(int)
+    df['Share_Pct'] = (df['Q1_Revenue'] / df['Q1_Revenue'].sum() * 100).round(1)
+    df = df.sort_values('Q1_Revenue', ascending=False).reset_index(drop=True)
+    df.insert(0, 'Rank', df.index + 1)
+    return df
+
+def aggregates(df):
+    return {
+        'total_revenue': int(df['Q1_Revenue'].sum()),
+        'total_orders': int(df['Q1_Orders'].sum()),
+        'avg_aov': int((df['Q1_Revenue'].sum() / df['Q1_Orders'].sum())),
+        'top_region': df.iloc[0]['Region'],
+        'region_count': len(df),
+        'regions': df['Region'].tolist(),
+        'revenues': df['Q1_Revenue'].tolist(),
+    }
+
+--- present ---
+<style>
+  .source-tag { display: inline-block; padding: 2px 8px; background: #dbeafe;
+                color: #1e40af; border-radius: 4px; font-size: 0.75rem;
+                font-family: monospace; }
+</style>
+
+<h1>{{ meta.name }}</h1>
+<p>{{ meta.description }}
+  <span class="source-tag">@source: q1_sales.json</span>
+</p>
+
+<div class="kpi-grid">
+  <div class="kpi"><div class="kpi-value">{{ format_currency(agg.total_revenue) }}</div><div class="kpi-label">Total Revenue</div></div>
+  <div class="kpi"><div class="kpi-value">{{ format_number(agg.total_orders, 0) }}</div><div class="kpi-label">Total Orders</div></div>
+  <div class="kpi"><div class="kpi-value">{{ format_currency(agg.avg_aov) }}</div><div class="kpi-label">Avg Order Value</div></div>
+  <div class="kpi"><div class="kpi-value">{{ agg.top_region }}</div><div class="kpi-label">Top Region</div></div>
+</div>
+
+chart: bar
+  data: agg.revenues
+  labels: agg.regions
+  title: "Q1 Revenue by Region"
+  width: 560
+  height: 280
+
+format: color_scale
+  column: Share_Pct
+  min: 0
+  max: 30
+  min_color: "#fef3c7"
+  max_color: "#3b82f6"
+
+<table>
+  <thead>
+    <tr><th>#</th><th>Region</th><th>Top Product</th><th class="number">Orders</th><th class="number">Revenue</th><th class="number">AOV</th><th class="number">Share</th></tr>
+  </thead>
+  <tbody>
+  {% for _, row in df.iterrows() %}
+    <tr>
+      <td><strong>{{ row.Rank }}</strong></td>
+      <td>{{ row.Region }}</td>
+      <td>{{ row.Top_Product }}</td>
+      <td class="number">{{ format_number(row.Q1_Orders, 0) }}</td>
+      <td class="number">{{ format_currency(row.Q1_Revenue) }}</td>
+      <td class="number">{{ format_currency(row.Avg_Order_Value) }}</td>
+      <td class="number" {{ cond_style('Share_Pct', row.Share_Pct) }}>{{ format_pct(row.Share_Pct) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p style="margin-top:2rem;font-size:0.85rem;color:#64748b;">
+  Try: <code>gridlang run examples/08_remote_data.grid</code> &mdash;
+  the <code>file://</code> fixture loads automatically.
+  Replace <code>@source</code> with an <code>https://</code> URL and add <code>--allow-remote</code> to fetch live.
+</p>
