@@ -1,0 +1,92 @@
+--- meta ---
+name: "JS Pipeline"
+version: "1.0"
+engine: javascript
+
+--- data ---
+Product,Q1,Q2,Q3,Q4
+Apples,120,135,150,160
+Berries,80,95,100,110
+Cherries,200,180,210,220
+Dates,40,55,60,65
+
+--- compute ---
+// Compute layer in JavaScript instead of Python.
+// The injected `df` argument is an array-of-records with helpers:
+//   df.col(name)  → array of column values
+//   df.sum(name)  → sum of a numeric column
+//   df.mean(name) → mean of a numeric column
+//   df.addColumn(name, fn) → mutate-in-place; fn receives (row, index)
+//   df.where(pred), df.row(i), df.columns, df.shape
+
+function transform(df) {
+  df.addColumn('Total',  r => +r.Q1 + +r.Q2 + +r.Q3 + +r.Q4);
+  df.addColumn('Avg',    r => +(r.Total / 4).toFixed(2));
+  df.addColumn('Growth', r => +(((r.Q4 - r.Q1) / r.Q1) * 100).toFixed(1));
+  return df;
+}
+
+function aggregates(df) {
+  return {
+    grand_total:    df.sum('Total'),
+    top_product:    df.where(r => r.Total === df.col('Total').reduce((a, b) => Math.max(a, b)))[0].Product,
+    avg_growth_pct: +(df.mean('Growth')).toFixed(1),
+    product_count:  df.shape[0],
+  };
+}
+
+function conditional_formats() {
+  return [
+    { column: 'Growth', rule: 'greater_than', value: 30, style: 'highlight-green' },
+    { column: 'Growth', rule: 'less_than',    value: 0,  style: 'highlight-red' },
+  ];
+}
+
+--- present ---
+<h1>{{ meta.name }}</h1>
+<p><em>Compute engine: JavaScript (Node)</em></p>
+
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="kpi-value">{{ "{:,}".format(agg.grand_total) }}</div>
+    <div class="kpi-label">Grand Total</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.top_product }}</div>
+    <div class="kpi-label">Top Product</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.avg_growth_pct }}%</div>
+    <div class="kpi-label">Avg Growth</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.product_count }}</div>
+    <div class="kpi-label">Products</div>
+  </div>
+</div>
+
+<h2>Quarterly Sales</h2>
+<table>
+  <thead>
+    <tr><th>Product</th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>Total</th><th>Avg</th><th>Growth %</th></tr>
+  </thead>
+  <tbody>
+    {% for row in df.to_dict('records') %}
+    <tr>
+      <td>{{ row.Product }}</td>
+      <td class="number">{{ row.Q1 }}</td>
+      <td class="number">{{ row.Q2 }}</td>
+      <td class="number">{{ row.Q3 }}</td>
+      <td class="number">{{ row.Q4 }}</td>
+      <td class="number">{{ row.Total }}</td>
+      <td class="number">{{ row.Avg }}</td>
+      <td class="number {{ cond_class('Growth', row.Growth) }}">{{ row.Growth }}%</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+chart: bar
+  data: F2:F5
+  labels: A2:A5
+  title: "Total Sales by Product"
