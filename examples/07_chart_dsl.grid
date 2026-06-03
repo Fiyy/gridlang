@@ -1,0 +1,112 @@
+--- meta ---
+name: "Chart DSL Showcase"
+engine: python
+version: "1.0"
+description: "Declarative chart and conditional-format syntax — no Jinja2 calls."
+
+--- data ---
+Region,Q1,Q2,Q3,Q4,Target
+North,120,135,150,165,140
+South,95,110,125,135,115
+East,80,90,105,120,100
+West,110,118,130,148,125
+
+--- compute ---
+def transform(df):
+    df['Total'] = df[['Q1', 'Q2', 'Q3', 'Q4']].sum(axis=1)
+    df['vs_Target'] = ((df['Q4'] - df['Target']) / df['Target'] * 100).round(1)
+    return df
+
+def aggregates(df):
+    return {
+        'total_rev': df['Total'].sum(),
+        'avg_growth': round(((df['Q4'] - df['Q1']) / df['Q1'] * 100).mean(), 1),
+        'top_region': df.loc[df['Total'].idxmax(), 'Region'],
+        'quarters': ['Q1', 'Q2', 'Q3', 'Q4'],
+        'q_totals': df[['Q1', 'Q2', 'Q3', 'Q4']].sum().tolist(),
+    }
+
+--- present ---
+<h1>{{ meta.name }}</h1>
+<p>{{ meta.description }}</p>
+
+<div class="kpi-grid">
+  <div class="kpi"><div class="kpi-value">{{ format_currency(agg.total_rev) }}</div><div class="kpi-label">Total Revenue</div></div>
+  <div class="kpi"><div class="kpi-value">{{ format_pct(agg.avg_growth) }}</div><div class="kpi-label">Avg Growth (Q1→Q4)</div></div>
+  <div class="kpi"><div class="kpi-value">{{ agg.top_region }}</div><div class="kpi-label">Top Region</div></div>
+</div>
+
+<h2>Quarterly Totals — Single Series Bar</h2>
+chart: bar
+  data: agg.q_totals
+  labels: agg.quarters
+  title: "Total Revenue by Quarter"
+  width: 500
+  height: 280
+  color: "#3b82f6"
+
+<h2>Region Breakdown — Pie</h2>
+chart: pie
+  data: Total
+  labels: Region
+  title: "Annual Revenue Share"
+  width: 320
+  height: 320
+
+<h2>Growth Trajectory — Multi-series Line</h2>
+chart: line
+  data: Q1,Q2,Q3,Q4
+  labels: Region
+  title: "Quarter-over-Quarter by Region"
+  width: 560
+  height: 300
+
+<h2>Quarterly Heatmap (A1 range)</h2>
+chart: heatmap
+  data: B2:E5
+  title: "Q1–Q4 by Region"
+  width: 500
+  height: 240
+
+<h2>Region vs Target — Conditional Formats</h2>
+
+format: color_scale
+  column: vs_Target
+  min: -20
+  max: 30
+  min_color: "#fee2e2"
+  max_color: "#bbf7d0"
+
+format: rules
+  column: Total
+  rule: ">500 -> bold green"
+  rule: "<400 -> italic red"
+
+<table>
+  <thead>
+    <tr>
+      <th>Region</th>
+      <th class="number">Q1</th>
+      <th class="number">Q2</th>
+      <th class="number">Q3</th>
+      <th class="number">Q4</th>
+      <th class="number">Target</th>
+      <th class="number">Total</th>
+      <th class="number">vs Target</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for _, row in df.iterrows() %}
+    <tr>
+      <td><strong>{{ row.Region }}</strong></td>
+      <td class="number">{{ format_currency(row.Q1) }}</td>
+      <td class="number">{{ format_currency(row.Q2) }}</td>
+      <td class="number">{{ format_currency(row.Q3) }}</td>
+      <td class="number">{{ format_currency(row.Q4) }}</td>
+      <td class="number">{{ format_currency(row.Target) }}</td>
+      <td class="number {{ cond_class('Total', row.Total) }}">{{ format_currency(row.Total) }}</td>
+      <td class="number" {{ cond_style('vs_Target', row.vs_Target) }}>{{ format_pct(row.vs_Target) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
