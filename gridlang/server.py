@@ -27,6 +27,8 @@ from gridlang.parser import parse_string, parse_file, ParseError
 from gridlang.schema import parse_data
 from gridlang.runtime import execute
 from gridlang.renderer import render
+from gridlang.data_sources import load_dataframes
+from gridlang.bindings import apply_edit, BindingError, client_js
 import pandas as pd
 
 
@@ -35,6 +37,7 @@ class GridLangHandler(SimpleHTTPRequestHandler):
 
     grid_path: Path = None
     edit_mode: bool = False
+    allow_remote: bool = False
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -85,7 +88,15 @@ class GridLangHandler(SimpleHTTPRequestHandler):
         """Render and serve the .grid file as standalone HTML."""
         try:
             html = self._render_from_file()
-            html = html.replace('</body>', _RELOAD_SCRIPT + '</body>')
+            # Inject auto-reload + (in --edit mode) bindings client JS so
+            # contenteditable cells and `bind:` widgets can post back to /api/cell-edit.
+            extra = _RELOAD_SCRIPT
+            if self.edit_mode and ('data-grid-cell' in html or 'data-grid-bind' in html):
+                extra = extra + client_js()
+            if '</body>' in html:
+                html = html.replace('</body>', extra + '</body>')
+            else:
+                html = html + extra
             self._send_html(200, html)
         except Exception as e:
             self._send_html(500, _error_page(str(e)))
@@ -231,10 +242,10 @@ class GridLangHandler(SimpleHTTPRequestHandler):
             if doc.is_multi_sheet:
                 sheets = {name: parse_data(raw) for name, raw in doc.sheets_raw.items()}
                 primary_df = list(sheets.values())[0]
-                result = execute(doc.compute_raw, primary_df, sheets=sheets)
+                result = execute(doc.compute_raw, primary_df, sheets=sheets, engine=doc.engine)
             else:
                 primary_df = parse_data(doc.data_raw)
-                result = execute(doc.compute_raw, primary_df)
+                result = execute(doc.compute_raw, primary_df, engine=doc.engine)
 
             csv_str = result.df.to_csv(index=False)
             self._send_json(200, {'data': csv_str, 'filename': 'export.csv'})
@@ -242,58 +253,119 @@ class GridLangHandler(SimpleHTTPRequestHandler):
             self._send_json(500, {'error': str(e)})
 
     def _api_cell_edit(self):
-        """POST /api/cell-edit — edit a cell in the data section, return updated .grid source."""
+        """POST /api/cell-edit — apply a cell edit to the .grid source.
+
+        Accepts two payload shapes:
+
+          New (A1) form, used by reactive bindings:
+              {"cell": "B2", "value": "120", "sheet": null, "save": true}
+
+          Legacy (row + column-name) form, used by the editor UI:
+              {"content": "...", "row": 0, "col": "Region", "value": "North"}
+
+        For the new form, ``save: true`` writes the result back to disk
+        (only honored when the server was started with ``--edit``). For
+        either shape, the response includes the updated ``content`` plus
+        a freshly-rendered HTML fragment so callers can refresh the
+        preview without a second round-trip.
+        """
         try:
             body = self._read_body()
             data = json.loads(body)
-            content = data.get('content', '')
-            row = data.get('row')          # 0-based data row index
-            col = data.get('col')          # column name
-            value = data.get('value', '')
-            sheet = data.get('sheet', None)  # for multi-sheet
+        except (json.JSONDecodeError, ValueError) as e:
+            self._send_json(400, {'error': f'Invalid JSON: {e}'})
+            return
 
-            doc = parse_string(content)
-
-            # Determine which raw data section to edit
-            if sheet and sheet in doc.sheets_raw:
-                raw_csv = doc.sheets_raw[sheet]
+        try:
+            # Dispatch on payload shape.
+            if 'cell' in data:
+                new_content, html = self._apply_a1_edit(data)
             else:
-                raw_csv = doc.data_raw
-
-            # Parse CSV lines
-            csv_lines = raw_csv.strip().split('\n')
-            if len(csv_lines) < 2:
-                self._send_json(400, {'error': 'No data rows'})
-                return
-
-            headers = [h.strip() for h in csv_lines[0].split(',')]
-            if col not in headers:
-                self._send_json(400, {'error': f'Column "{col}" not found'})
-                return
-
-            col_idx = headers.index(col)
-            data_row_idx = row + 1  # +1 for header
-
-            if data_row_idx >= len(csv_lines):
-                self._send_json(400, {'error': f'Row {row} out of range'})
-                return
-
-            # Parse the target row, update the cell
-            row_parts = csv_lines[data_row_idx].split(',')
-            # Pad if needed
-            while len(row_parts) <= col_idx:
-                row_parts.append('')
-            row_parts[col_idx] = str(value)
-            csv_lines[data_row_idx] = ','.join(row_parts)
-
-            new_csv = '\n'.join(csv_lines)
-
-            # Rebuild the .grid source with updated data
-            new_content = self._replace_data_section(content, new_csv, sheet)
-
-            self._send_json(200, {'content': new_content})
+                new_content, html = self._apply_legacy_edit(data)
+        except BindingError as e:
+            self._send_json(400, {'error': str(e)})
+            return
+        except (ParseError, ValueError) as e:
+            self._send_json(400, {'error': str(e)})
+            return
         except Exception as e:
-            self._send_json(500, {'error': str(e)})
+            self._send_json(500, {'error': f'{type(e).__name__}: {e}'})
+            return
+
+        self._send_json(200, {'content': new_content, 'html': html, 'error': None})
+
+    def _apply_a1_edit(self, data: dict) -> tuple[str, str]:
+        """Handle ``{cell, value, sheet?, save?, content?}`` payloads."""
+        cell = data.get('cell')
+        if not cell:
+            raise BindingError("'cell' is required")
+        value = data.get('value', '')
+        sheet = data.get('sheet')
+        save = bool(data.get('save', False))
+
+        # Source: explicit content beats on-disk file.
+        content = data.get('content')
+        if content is None:
+            content = self.grid_path.read_text(encoding='utf-8')
+
+        new_content = apply_edit(content, cell=cell, value=value, sheet=sheet)
+
+        # Render so the client can refresh the preview without a second hop.
+        try:
+            html = self._render_from_string(new_content)
+        except Exception as e:
+            html = ''  # render failure isn't fatal for the edit itself
+
+        if save:
+            self.grid_path.write_text(new_content, encoding='utf-8')
+
+        return new_content, html
+
+    def _apply_legacy_edit(self, data: dict) -> tuple[str, str]:
+        """Handle the original ``{content, row, col, value, sheet}`` payloads."""
+        content = data.get('content', '')
+        row = data.get('row')
+        col = data.get('col')
+        value = data.get('value', '')
+        sheet = data.get('sheet', None)
+
+        doc = parse_string(content)
+
+        # Determine which raw data section to edit.
+        if sheet and sheet in doc.sheets_raw:
+            raw_csv = doc.sheets_raw[sheet]
+        else:
+            raw_csv = doc.data_raw
+
+        csv_lines = raw_csv.strip().split('\n')
+        if len(csv_lines) < 2:
+            raise ValueError('No data rows')
+
+        headers = [h.strip() for h in csv_lines[0].split(',')]
+        if col not in headers:
+            raise ValueError(f'Column "{col}" not found')
+
+        col_idx = headers.index(col)
+        data_row_idx = row + 1  # +1 for header
+
+        if data_row_idx >= len(csv_lines):
+            raise ValueError(f'Row {row} out of range')
+
+        row_parts = csv_lines[data_row_idx].split(',')
+        while len(row_parts) <= col_idx:
+            row_parts.append('')
+        row_parts[col_idx] = str(value)
+        csv_lines[data_row_idx] = ','.join(row_parts)
+
+        new_csv = '\n'.join(csv_lines)
+        new_content = self._replace_data_section(content, new_csv, sheet)
+
+        try:
+            html = self._render_from_string(new_content)
+        except Exception:
+            html = ''
+        return new_content, html
+
 
     @staticmethod
     def _replace_data_section(content: str, new_csv: str, sheet: str = None) -> str:
@@ -345,14 +417,11 @@ class GridLangHandler(SimpleHTTPRequestHandler):
 
     def _render_doc(self, doc) -> str:
         """Execute compute + render HTML for a parsed GridDocument."""
-        if doc.is_multi_sheet:
-            sheets = {name: parse_data(raw) for name, raw in doc.sheets_raw.items()}
-            primary_df = list(sheets.values())[0]
-        else:
-            primary_df = parse_data(doc.data_raw)
-            sheets = None
+        sheets, _ = load_dataframes(doc, allow_remote=self.allow_remote)
+        primary_df = list(sheets.values())[0] if sheets else pd.DataFrame()
+        sheets_for_compute = sheets if doc.is_multi_sheet else None
 
-        result = execute(doc.compute_raw, primary_df, sheets=sheets)
+        result = execute(doc.compute_raw, primary_df, sheets=sheets_for_compute, engine=doc.engine)
 
         html = render(
             template_content=doc.present_raw,
@@ -490,38 +559,19 @@ EDITOR_HTML = r"""<!DOCTYPE html>
   .ed-tab.active { color: var(--text); }
 
   /* Editor wrapper with line numbers */
-  .ed-wrap { flex: 1; display: flex; overflow: hidden; position: relative; }
+  .ed-wrap { flex: 1; display: flex; overflow: hidden; }
   .ed-lines {
     width: 44px; background: var(--bg); color: #475569; font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
     text-align: right; padding: 10px 6px 10px 0; overflow: hidden; user-select: none;
     border-right: 1px solid var(--border);
   }
   .ed-input {
-    flex: 1; background: var(--bg); color: var(--text); border: none; outline: none; resize: none;
+    flex: 1; background: var(--bg); color: #cbd5e1; border: none; outline: none; resize: none;
     font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
     padding: 10px 12px; tab-size: 4; white-space: pre; overflow: auto;
+    caret-color: #3b82f6;
   }
   .ed-input::selection { background: rgba(59,130,246,0.3); }
-
-  /* Syntax-highlighted overlay */
-  .ed-highlight {
-    position: absolute; top: 0; left: 45px; right: 0; bottom: 0;
-    pointer-events: none; overflow: hidden;
-    font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    padding: 10px 12px; white-space: pre; tab-size: 4; color: transparent;
-  }
-  .ed-highlight .sec { color: #c084fc; font-weight: 700; }
-  .ed-highlight .kw { color: #c084fc; }
-  .ed-highlight .fn { color: #22d3ee; }
-  .ed-highlight .xl { color: #fbbf24; }
-  .ed-highlight .str { color: #86efac; }
-  .ed-highlight .num { color: #f97316; }
-  .ed-highlight .cmt { color: #64748b; font-style: italic; }
-  .ed-highlight .tag { color: #818cf8; }
-  .ed-highlight .j2e { color: #fb923c; }
-  .ed-highlight .j2b { color: #f472b6; }
-  .ed-highlight .var { color: #67e8f9; }
-  .ed-highlight .meta-key { color: #38bdf8; }
 
   /* Error panel */
   .err-box {
@@ -606,7 +656,6 @@ EDITOR_HTML = r"""<!DOCTYPE html>
     <div class="ed-tabs"><div class="ed-tab active">Source</div></div>
     <div class="ed-wrap">
       <div class="ed-lines" id="lines">1</div>
-      <div class="ed-highlight" id="highlight"></div>
       <textarea class="ed-input" id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
     </div>
     <div class="err-box" id="errbox"></div>
@@ -635,7 +684,6 @@ EDITOR_HTML = r"""<!DOCTYPE html>
 <script>
 // State
 const ed = document.getElementById('editor');
-const hl = document.getElementById('highlight');
 const lines = document.getElementById('lines');
 const errbox = document.getElementById('errbox');
 const dot = document.getElementById('dot');
@@ -648,27 +696,19 @@ fetch('/api/source').then(r=>r.json()).then(d => {
   document.getElementById('fname').textContent = d.filename;
   saved = d.content;
   ed.value = d.content;
-  syncAll();
+  syncLines();
   doRender();
 });
 
 // ── Editor events ──
 ed.addEventListener('input', () => {
-  syncAll();
+  syncLines();
   clearTimeout(timer);
   timer = setTimeout(doRender, 600);
   updMod();
 });
-ed.addEventListener('scroll', syncScroll);
+ed.addEventListener('scroll', () => { lines.scrollTop = ed.scrollTop; });
 ed.addEventListener('keydown', handleTab);
-
-function syncAll() { syncLines(); syncHighlight(); syncScroll(); }
-
-function syncScroll() {
-  hl.scrollTop = ed.scrollTop;
-  hl.scrollLeft = ed.scrollLeft;
-  lines.scrollTop = ed.scrollTop;
-}
 
 function syncLines() {
   const n = ed.value.split('\n').length;
@@ -683,58 +723,12 @@ function handleTab(e) {
     const s = ed.selectionStart, en = ed.selectionEnd;
     ed.value = ed.value.substring(0, s) + '    ' + ed.value.substring(en);
     ed.selectionStart = ed.selectionEnd = s + 4;
-    syncAll();
+    syncLines();
   }
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
     doSave();
   }
-}
-
-// ── Syntax highlighting ──
-function syncHighlight() {
-  const text = ed.value;
-  let html = escHtml(text);
-
-  // Section delimiters
-  html = html.replace(/^(---\s+[\w:]+\s+---)$/gm, '<span class="sec">$1</span>');
-
-  // Meta keys
-  html = html.replace(/^((?:name|engine|version|description|author|tags|dependencies|schema|import_date|imported_from|sheets)\s*:)/gm, '<span class="meta-key">$1</span>');
-
-  // Python keywords
-  html = html.replace(/\b(def|return|if|elif|else|for|in|import|from|as|not|and|or|True|False|None|pass|lambda|class|try|except|raise|with|yield|while|break|continue)\b/g, '<span class="kw">$1</span>');
-
-  // GridLang function names
-  html = html.replace(/\b(transform|aggregates|validate|conditional_formats)\b/g, '<span class="fn">$1</span>');
-
-  // Excel formula names
-  html = html.replace(/\b(SUMIF|COUNTIF|VLOOKUP|XLOOKUP|HLOOKUP|PIVOT|GROUPBY|SORT|FILTER|IF|IFS|SWITCH|ROUND|ABS|LEFT|RIGHT|MID|UPPER|LOWER|TRIM|YEAR|MONTH|DAY|CONCATENATE|RANK|PERCENTILE|MEDIAN|STDEV|UNIQUE|TRANSPOSE|IFERROR|AVERAGEIF|SUMIFS|COUNTIFS|INDEX|MATCH|TODAY|NOW|LEN|SUBSTITUTE|PROPER|TEXT|DATEDIF|NETWORKDAYS|MOD|POWER|CEILING|FLOOR|ROUNDUP|ROUNDDOWN|AND|OR|NOT|SMALL|LARGE|QUARTILE|VAR|EDATE|WEEKDAY)\b/g, '<span class="xl">$1</span>');
-
-  // Built-in variables
-  html = html.replace(/\b(pd|np|df|sheets|agg|meta|raw_df)\b/g, '<span class="var">$1</span>');
-
-  // Strings (simple — double and single quoted)
-  html = html.replace(/(&quot;[^&]*?&quot;|&#x27;[^&]*?&#x27;)/g, '<span class="str">$1</span>');
-
-  // Numbers
-  html = html.replace(/\b(\d+\.?\d*)\b/g, '<span class="num">$1</span>');
-
-  // Comments
-  html = html.replace(/(#[^\n]*)/g, '<span class="cmt">$1</span>');
-
-  // Jinja2
-  html = html.replace(/(\{\{.*?\}\})/g, '<span class="j2e">$1</span>');
-  html = html.replace(/(\{%.*?%\})/g, '<span class="j2b">$1</span>');
-
-  // HTML tags
-  html = html.replace(/(&lt;\/?[\w-]+)/g, '<span class="tag">$1</span>');
-
-  hl.innerHTML = html + '\n';
-}
-
-function escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
 }
 
 // ── Render preview ──
@@ -805,7 +799,7 @@ function doFormat() {
   v = v.replace(/\n*(---\s+[\w:]+\s+---)\n*/g, '\n\n$1\n');
   v = v.trim() + '\n';
   ed.value = v;
-  syncAll();
+  syncLines();
   doRender();
   setSt('ok','Formatted');
 }
@@ -834,7 +828,7 @@ async function handleFileSelect(e) {
         setSt('err', d.error);
       } else {
         ed.value = d.content;
-        syncAll();
+        syncLines();
         doRender();
         setSt('ok', 'Imported ' + file.name);
       }
@@ -993,7 +987,7 @@ async function onCellBlur(td) {
     }
     // Update source editor
     ed.value = d.content;
-    syncAll();
+    syncLines();
     updMod();
     // Re-render preview
     doRender();
@@ -1036,7 +1030,8 @@ async function onCellBlur(td) {
 # Server Entry Point
 # =============================================================================
 
-def serve(grid_path: str | Path, port: int = 8080, edit: bool = False):
+def serve(grid_path: str | Path, port: int = 8080, edit: bool = False,
+          allow_remote: bool = False):
     """
     Start a local HTTP server.
 
@@ -1044,6 +1039,7 @@ def serve(grid_path: str | Path, port: int = 8080, edit: bool = False):
         grid_path: Path to the .grid file.
         port: HTTP port number.
         edit: If True, serve the editor UI. If False, preview only.
+        allow_remote: If True, http(s) @source URLs in data sections are fetched.
     """
     path = Path(grid_path).resolve()
     if not path.exists():
@@ -1051,6 +1047,7 @@ def serve(grid_path: str | Path, port: int = 8080, edit: bool = False):
 
     GridLangHandler.grid_path = path
     GridLangHandler.edit_mode = edit
+    GridLangHandler.allow_remote = allow_remote
 
     server = HTTPServer(('127.0.0.1', port), GridLangHandler)
 
@@ -1062,6 +1059,8 @@ def serve(grid_path: str | Path, port: int = 8080, edit: bool = False):
     print(f"  URL:       http://localhost:{port}")
     if edit:
         print(f"  Preview:   http://localhost:{port}/preview")
+    if allow_remote:
+        print(f"  Remote sources: ENABLED (--allow-remote)")
     print(f"  {'─' * 44}")
     print(f"  Auto-reload: enabled")
     print(f"  Press Ctrl+C to stop\n")

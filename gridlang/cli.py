@@ -22,6 +22,7 @@ from gridlang.parser import parse_file, ParseError, GridDocument
 from gridlang.schema import parse_data, validate_schema, SchemaError, check_schema
 from gridlang.runtime import execute, RuntimeError_, ExecutionResult
 from gridlang.renderer import render, RenderError
+from gridlang.data_sources import load_dataframes, DataSourceError
 
 
 def main():
@@ -30,7 +31,7 @@ def main():
         prog='gridlang',
         description='GridLang — AI-native spreadsheet format toolkit',
     )
-    parser.add_argument('--version', action='version', version='gridlang 0.2.0')
+    parser.add_argument('--version', action='version', version='gridlang 0.7.0')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
@@ -39,6 +40,10 @@ def main():
     run_parser.add_argument('file', type=str, help='Path to .grid file')
     run_parser.add_argument('--json', action='store_true', help='Output as JSON')
     run_parser.add_argument('--sheet', type=str, default=None, help='Specific sheet to display')
+    run_parser.add_argument('--allow-remote', action='store_true',
+                            help='Allow http(s) @source URLs (default: only file:// permitted)')
+    run_parser.add_argument('--no-cache', action='store_true',
+                            help='Bypass remote-source cache (force refetch)')
 
     # render command
     render_parser = subparsers.add_parser('render', help='Render to HTML file')
@@ -47,6 +52,10 @@ def main():
                                help='Output HTML file path (default: stdout)')
     render_parser.add_argument('--fragment', action='store_true',
                                help='Output HTML fragment without full document wrapper')
+    render_parser.add_argument('--allow-remote', action='store_true',
+                               help='Allow http(s) @source URLs (default: only file:// permitted)')
+    render_parser.add_argument('--no-cache', action='store_true',
+                               help='Bypass remote-source cache (force refetch)')
 
     # validate command
     validate_parser = subparsers.add_parser('validate', help='Validate .grid file format')
@@ -92,6 +101,23 @@ def main():
     serve_parser.add_argument('--port', type=int, default=8080, help='HTTP port (default: 8080)')
     serve_parser.add_argument('--edit', action='store_true',
                                help='Open editor UI with live preview (default: preview only)')
+    serve_parser.add_argument('--allow-remote', action='store_true',
+                               help='Allow http(s) @source URLs while serving')
+
+    # js-bundle command (v0.7) — emit a self-contained JS bundle from a .grid file.
+    bundle_parser = subparsers.add_parser(
+        'js-bundle',
+        help='Bundle a .grid file (engine: javascript) into a self-contained JS file',
+    )
+    bundle_parser.add_argument('file', type=str, help='Path to .grid file')
+    bundle_parser.add_argument('-o', '--output', type=str, default=None,
+                                help='Output JS file path (default: stdout)')
+    bundle_parser.add_argument('--browser', action='store_true',
+                                help='Emit a Web Worker / browser bundle instead of a Node bundle')
+    bundle_parser.add_argument('--minify', action='store_true',
+                                help='Skip pretty-printing the embedded JSON (smaller but less readable)')
+    bundle_parser.add_argument('--allow-remote', action='store_true',
+                                help='Fetch @source URLs at bundle time (default: only file://)')
 
     args = parser.parse_args()
 
@@ -115,6 +141,8 @@ def main():
             cmd_export(args)
         elif args.command == 'serve':
             cmd_serve(args)
+        elif args.command == 'js-bundle':
+            cmd_js_bundle(args)
     except (ParseError, SchemaError, RuntimeError_, RenderError) as e:
         _error(str(e))
     except FileNotFoundError as e:
@@ -127,20 +155,17 @@ def cmd_run(args):
     """Execute the .grid file and show results."""
     doc = parse_file(args.file)
 
-    # Parse data (multi-sheet aware)
-    if doc.is_multi_sheet:
-        sheets = {name: parse_data(raw) for name, raw in doc.sheets_raw.items()}
-        primary_df = list(sheets.values())[0]
-    else:
-        primary_df = parse_data(doc.data_raw)
-        sheets = {'default': primary_df}
+    # Resolve data layer (handles @source remote/file://, with cache + fallback).
+    cache_dir = None if getattr(args, 'no_cache', False) else None  # None → use default
+    sheets, source_labels = _load_doc_dataframes(doc, args)
+    primary_df = list(sheets.values())[0] if sheets else pd.DataFrame()
 
     # Validate schema if defined
     schema = doc.meta.get('schema')
     check_schema(primary_df, schema)
 
     # Execute compute
-    result = execute(doc.compute_raw, primary_df, sheets=sheets)
+    result = execute(doc.compute_raw, primary_df, sheets=sheets, engine=doc.engine)
 
     # Output
     if args.json:
@@ -149,6 +174,7 @@ def cmd_run(args):
             'data': result.df.to_dict(orient='records'),
             'aggregates': _serialize_aggregates(result.aggregates),
             'functions': result.compute_functions,
+            'sources': source_labels,
         }
         if result.is_multi_sheet:
             output['sheets'] = {
@@ -159,6 +185,14 @@ def cmd_run(args):
     else:
         _print_header(doc)
         print()
+
+        # Show source labels for any sheet that came from a non-inline source.
+        non_inline = {n: l for n, l in source_labels.items() if l != 'inline'}
+        if non_inline:
+            print("━━━ Data Sources ━━━")
+            for name, label in non_inline.items():
+                print(f"  {name}: {label}")
+            print()
 
         # Show specific sheet or primary
         if args.sheet and args.sheet in result.sheets:
@@ -201,20 +235,16 @@ def cmd_render(args):
     """Render .grid file to HTML."""
     doc = parse_file(args.file)
 
-    # Parse data
-    if doc.is_multi_sheet:
-        sheets = {name: parse_data(raw) for name, raw in doc.sheets_raw.items()}
-        primary_df = list(sheets.values())[0]
-    else:
-        primary_df = parse_data(doc.data_raw)
-        sheets = None
+    sheets, _ = _load_doc_dataframes(doc, args)
+    primary_df = list(sheets.values())[0] if sheets else pd.DataFrame()
+    sheets_for_compute = sheets if doc.is_multi_sheet else None
 
     # Schema validation
     schema = doc.meta.get('schema')
     check_schema(primary_df, schema)
 
     # Execute compute
-    result = execute(doc.compute_raw, primary_df, sheets=sheets)
+    result = execute(doc.compute_raw, primary_df, sheets=sheets_for_compute, engine=doc.engine)
 
     # Render
     html = render(
@@ -237,6 +267,35 @@ def cmd_render(args):
         print(html)
 
 
+def _load_doc_dataframes(doc: GridDocument, args) -> tuple[dict, dict]:
+    """
+    Bridge between CLI args and data_sources.load_dataframes.
+
+    Returns:
+        sheets:        dict[sheet_name, DataFrame]
+        source_labels: dict[sheet_name, str]
+    """
+    allow_remote = bool(getattr(args, 'allow_remote', False))
+    cache_dir = None  # honor GRIDLANG_CACHE_DIR / default
+
+    if getattr(args, 'no_cache', False):
+        # Use a throwaway cache dir under tmp so we always refetch.
+        import tempfile
+        cache_dir = Path(tempfile.mkdtemp(prefix='gridlang-nocache-'))
+
+    try:
+        sheets, labels = load_dataframes(
+            doc, allow_remote=allow_remote, cache_dir=cache_dir,
+        )
+    except DataSourceError as e:
+        # Re-raise with a hint about --allow-remote when it's the cause.
+        msg = str(e)
+        if 'requires --allow-remote' in msg:
+            raise DataSourceError(msg)
+        raise
+    return sheets, labels
+
+
 def cmd_validate(args):
     """Validate a .grid file."""
     errors = []
@@ -253,6 +312,7 @@ def cmd_validate(args):
         return
 
     # Step 2: Data parsing
+    df = None
     try:
         df = parse_data(doc.data_raw)
         rows, cols = df.shape
@@ -260,6 +320,19 @@ def cmd_validate(args):
     except Exception as e:
         errors.append(f"Data parse error: {e}")
         df = None
+
+    # Step 2b: Remote sources (announced, not fetched)
+    remote_specs = {n: s for n, s in doc.data_specs.items() if s.is_remote}
+    if remote_specs:
+        for name, spec in remote_specs.items():
+            scheme = spec.scheme
+            kind = "local file" if scheme == 'file' else f"remote ({scheme})"
+            print(f"  ◐ Data source [{name}]: {kind} → {spec.source}")
+            if not args.strict and scheme in ('http', 'https'):
+                warnings.append(
+                    f"Sheet '{name}' fetches from {spec.source!r}; "
+                    f"run with --allow-remote to enable."
+                )
 
     # Step 3: Schema validation
     if df is not None:
@@ -338,6 +411,15 @@ def cmd_info(args):
             print(f"  ├─ data ────── {summary['data_lines']:>3} lines")
     else:
         print(f"  ├─ data ────── (empty)")
+
+    # Remote sources
+    remote_specs = {n: s for n, s in doc.data_specs.items() if s.is_remote}
+    if remote_specs:
+        for name, spec in remote_specs.items():
+            scheme = spec.scheme
+            tag = "file" if scheme == 'file' else "remote"
+            print(f"  │   @source [{name}]: {tag} → {spec.source}"
+                  f" (format={spec.format}, cache={int(spec.cache_ttl)}s)")
 
     # Compute info
     if summary['has_compute']:
@@ -432,7 +514,70 @@ def cmd_export(args):
 def cmd_serve(args):
     """Start live preview server or editor."""
     from gridlang.server import serve
-    serve(args.file, port=args.port, edit=args.edit)
+    serve(args.file, port=args.port, edit=args.edit,
+          allow_remote=getattr(args, 'allow_remote', False))
+
+
+def cmd_js_bundle(args):
+    """Emit a self-contained JS bundle from a .grid file."""
+    from gridlang.js_bundle import bundle_file
+
+    target = 'browser' if args.browser else 'node'
+    result = bundle_file(
+        args.file,
+        target=target,
+        pretty=not args.minify,
+        allow_remote=getattr(args, 'allow_remote', False),
+    )
+
+    if args.output:
+        output_path = Path(args.output)
+        output_path.write_text(result.source, encoding='utf-8')
+        print(f"  📦 Bundled: {args.file} → {output_path}")
+        print(f"     Target:  {result.target}")
+        print(f"     Size:    {result.bytes:,} bytes")
+        print(f"     Sheets:  {result.sheet_count}")
+        if target == 'node':
+            print(f"     Run:     node {output_path}")
+        else:
+            print(f"     Use:     <script src=\"{output_path}\"></script>")
+            print(f"              or new Worker(URL.createObjectURL(...))")
+    else:
+        # Stream to stdout
+        sys.stdout.write(result.source)
+        if not result.source.endswith('\n'):
+            sys.stdout.write('\n')
+
+
+def cmd_js_bundle(args):
+    """Emit a self-contained JS bundle from a .grid file."""
+    from gridlang.js_bundle import bundle_file
+
+    target = 'browser' if args.browser else 'node'
+    result = bundle_file(
+        args.file,
+        target=target,
+        pretty=not args.minify,
+        allow_remote=getattr(args, 'allow_remote', False),
+    )
+
+    if args.output:
+        output_path = Path(args.output)
+        output_path.write_text(result.source, encoding='utf-8')
+        print(f"  📦 Bundled: {args.file} → {output_path}")
+        print(f"     Target:  {result.target}")
+        print(f"     Size:    {result.bytes:,} bytes")
+        print(f"     Sheets:  {result.sheet_count}")
+        if target == 'node':
+            print(f"     Run:     node {output_path}")
+        else:
+            print(f"     Use:     <script src=\"{output_path}\"></script>")
+            print(f"              or new Worker(URL.createObjectURL(...))")
+    else:
+        # Stream to stdout
+        sys.stdout.write(result.source)
+        if not result.source.endswith('\n'):
+            sys.stdout.write('\n')
 
 
 def _print_header(doc: GridDocument):

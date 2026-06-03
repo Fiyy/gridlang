@@ -763,8 +763,812 @@ gridlang serve dashboard.grid --port 3000
 ## 15. Future Extensions (v2.0 Roadmap)
 
 - ~~**Multi-sheet** — Multiple data sections in one file (`--- data:sheet_name ---`)~~ ✓ DONE (v0.2, see §4.5)
-- **Reactive bindings** — Two-way binding between present layer edits and data layer
-- **Remote data sources** — `--- data:url ---` to fetch from APIs
-- **Chart DSL** — Simplified chart declaration syntax within present layer
-- **JavaScript engine** — Alternative compute engine for browser-native execution
+- ~~**Chart DSL** — Simplified chart declaration syntax within present layer~~ ✓ DONE (v0.3, see §16)
+- ~~**Remote data sources** — `@source` directive at top of data sections~~ ✓ DONE (v0.4, see §17)
+- ~~**Reactive bindings** — Two-way binding between present layer edits and data layer~~ ✓ DONE (v0.5, see §18)
+- ~~**JavaScript engine** — Alternative compute engine for browser-native execution~~ ✓ DONE (v0.6, see §19)
 - **Collaborative editing** — CRDT-based real-time collaboration protocol
+
+## 16. Chart & Format DSL (v0.3)
+
+The present layer supports a declarative block syntax for charts and conditional
+formatting that compiles to the corresponding Jinja2 helper calls. This is the
+preferred way for AI agents to author visualizations because it does not require
+constructing template expressions.
+
+### 16.1 Block Syntax
+
+A block begins with a top-level line `chart: TYPE` or `format: TYPE` and is
+followed by one or more indented `key: value` lines. The block ends at the first
+line that is non-blank and indented at or below the head:
+
+```
+chart: bar
+  data: agg.region_revenue
+  labels: agg.region_labels
+  title: "Revenue by Region"
+  width: 500
+  height: 280
+```
+
+Two consecutive blank lines also end a block. Continuation of a long value is
+allowed by indenting subsequent lines further than the head.
+
+### 16.2 Supported `chart:` Types
+
+| Type           | Compiles to            | Required keys     |
+|----------------|-----------------------|-------------------|
+| `bar`          | `bar_chart`           | `data`, `labels`  |
+| `line`         | `line_chart`          | `data`, `labels`  |
+| `pie`          | `pie_chart`           | `data`, `labels`  |
+| `scatter`      | `scatter_chart`       | `x`, `y`          |
+| `area`         | `area_chart`          | `data`, `labels`  |
+| `stacked_bar`  | `stacked_bar_chart`   | `data` (multi-col), `labels` |
+| `heatmap`      | `heatmap`             | `data` (DataFrame slice / A1) |
+| `sparkline`    | `sparkline`           | `data`            |
+| `color_scale`  | `color_scale`         | `value`           |
+
+All other keys (e.g. `title`, `width`, `height`, `color`, `colors`, `show_values`)
+become keyword arguments to the underlying chart function. Quoted strings are
+forwarded as-is.
+
+### 16.3 Reference Resolution
+
+Values inside a block are resolved against the runtime template context:
+
+| Form             | Resolves to                                    |
+|------------------|------------------------------------------------|
+| `42` / `3.14`    | numeric literal                                |
+| `"hello"`        | string literal                                 |
+| `[a, b, c]`      | list literal (each element re-resolved)        |
+| `agg.foo`        | `agg['foo']` from compute aggregates           |
+| `meta.foo`       | `meta['foo']` from meta section                |
+| `Q1,Q2,Q3,Q4`    | dict-of-series (line/area/stacked) or concat   |
+| `Revenue`        | `df['Revenue'].tolist()` (single column)       |
+| `sales!Revenue`  | `sheets['sales']['Revenue'].tolist()`          |
+| `B2:D4`          | A1 range as flat list (or DataFrame for heatmap) |
+| `B2:D4@sales`    | A1 range scoped to a named sheet               |
+| `B2@sales`       | single A1 cell, must be sheet-qualified        |
+
+A1 row indices follow Excel convention: row 1 is the header, row 2 is the first
+data row. Column letters follow Excel: A=0, B=1, …, Z=25, AA=26.
+
+Bare A1 cell references like `B2` are NOT auto-resolved — they would shadow real
+column names. Cells must be qualified with `@sheet` to disambiguate.
+
+### 16.4 Supported `format:` Types
+
+| Type            | Behavior                                                          |
+|-----------------|-------------------------------------------------------------------|
+| `color_scale`   | Gradient color between `min_color` and `max_color`                |
+| `data_bar`      | Bar width proportional to value                                   |
+| `greater_than`  | Apply style when cell > value                                     |
+| `less_than`     | Apply style when cell < value                                     |
+| `equals`        | Apply style when cell == value                                    |
+| `between`       | Apply style when value ≤ cell ≤ value2                            |
+| `rules`         | Multiple inline rules: `rule: ">90 -> bold green"`                |
+
+Common keys: `column`, `range`, `value`, `value2`, `style`, `min_color`,
+`max_color`. The shorthand `min:`/`max:` selects between numeric bound and color
+based on whether the value parses as a hex/quoted string.
+
+The `format: rules` form accepts any number of `rule:` lines with the inline
+syntax `<op> <value> -> <style words>`. Recognized color words (`red`, `green`,
+`yellow`) map to the renderer's `highlight-*` CSS classes.
+
+### 16.5 Interaction with Runtime Conditional Formats
+
+DSL `format:` blocks are merged with the `conditional_formats()` function from
+the compute layer; both contribute `ConditionalFormat` objects to the same list.
+Style classes and inline styles are emitted via `cond_class(col, value)` and
+`cond_style(col, value)` template helpers.
+
+### 16.6 Example
+
+```
+--- present ---
+chart: bar
+  data: agg.region_revenue
+  labels: agg.region_labels
+  title: "Q1 Sales by Region"
+
+chart: heatmap
+  data: B2:D10
+  title: "Correlation Matrix"
+
+format: color_scale
+  range: B2:B100
+  min_color: "#ffffff"
+  max_color: "#e74c3c"
+
+format: rules
+  range: D2:D50
+  rule: ">90 -> bold green"
+  rule: "<60 -> italic red"
+```
+
+### 16.7 Backward Compatibility
+
+Files written before v0.3 that use explicit Jinja2 chart calls
+(`{{ bar_chart(...) }}`) continue to work unchanged — the DSL preprocessor only
+acts on lines that match the `chart:` / `format:` head pattern.
+
+## 17. Remote Data Sources (v0.4)
+
+A data section may begin with one or more `@directive: value` lines that load the
+data from an external location instead of (or in addition to) the inline CSV. The
+inline CSV becomes a fallback used when the remote source is unavailable or
+disabled.
+
+### 17.1 Syntax
+
+```
+--- data ---
+@source: https://api.example.com/sales.csv
+@format: csv               # csv | tsv | json | xlsx | auto (default)
+@cache: 1h                 # 30s | 5m | 1h | 7d | 0 / off
+@timeout: 10               # seconds, default 15
+@header: Authorization: Bearer xyz   # repeatable
+@select: data.records      # JSON dot-path drilldown
+@encoding: utf-8           # default utf-8
+@sheet: Sheet1             # for xlsx sources
+
+# Inline fallback (used when remote denied / failed)
+Region,Total
+North,100
+South,95
+```
+
+A line counts as part of the directive zone if it is a `@key: value` line, blank,
+or a `#` comment. The first non-directive content line (and everything after it)
+becomes the inline CSV body.
+
+A pure-CSV data section with no `@` directives behaves identically to v0.3.
+
+### 17.2 Directive Reference
+
+| Directive    | Type       | Default | Notes                                              |
+|--------------|-----------|---------|---------------------------------------------------|
+| `@source`    | URL       | —       | Required to enable remote loading. See §17.4 for schemes. |
+| `@format`    | enum      | `auto`  | `csv` / `tsv` / `json` / `xlsx` / `auto` (sniff from URL) |
+| `@cache`     | duration  | `1h`    | TTL of the on-disk cache. `0` / `off` disables. |
+| `@timeout`   | float (s) | `15`    | Network timeout per request.                      |
+| `@header`    | string    | —       | `Name: Value` header sent with the request. Repeatable. |
+| `@select`    | dot-path  | —       | JSON-only: drill into a sub-path before parsing. Supports `a.b.c[0].d`. |
+| `@encoding`  | string    | `utf-8` | Text decoding charset.                            |
+| `@sheet`     | string    | first   | XLSX-only: which worksheet to read.               |
+
+### 17.3 Format Detection (`auto`)
+
+The `@source` URL extension determines the format:
+
+| Extension                 | Format |
+|---------------------------|--------|
+| `.csv`                    | csv    |
+| `.tsv`                    | tsv    |
+| `.json`                   | json   |
+| `.xlsx` / `.xls`          | xlsx   |
+| (anything else / no ext)  | csv    |
+
+### 17.4 Allowed Schemes & Safety Model
+
+| Scheme       | Always allowed? | Notes                                            |
+|--------------|----------------|---------------------------------------------------|
+| `file://`    | yes             | Local file. Useful for fixtures and tests.       |
+| `http://`    | only with opt-in | Requires `--allow-remote` (CLI) or `allow_remote=True` (API). |
+| `https://`   | only with opt-in | Same as above.                                   |
+| (other)      | rejected        | Raises a `DataSourceError` at parse time.        |
+
+When `http(s)` access is denied:
+* If an inline CSV fallback is present, it is used and labeled `fallback:<url>`.
+* Otherwise a `DataSourceError` is raised demanding `--allow-remote`.
+
+When `http(s)` access is enabled but the fetch fails:
+* If an inline fallback is present, it is used and labeled `fallback:<url>` with
+  the underlying error in parentheses.
+* Otherwise the original error is propagated.
+
+This model ensures that a `.grid` file never silently issues network requests
+unless the user has explicitly opted in.
+
+### 17.5 Caching
+
+Successful `http(s)` fetches are written to a content-addressed cache keyed by
+SHA1(`source` + sorted `headers` + `format` + `select`). The cache directory
+defaults to `~/.cache/gridlang/sources/` and may be overridden by the
+`GRIDLANG_CACHE_DIR` environment variable. Cache entries older than the
+`@cache` TTL are ignored. `file://` fetches are not cached — the file system is
+already the cache.
+
+The CLI flag `--no-cache` (on `run` / `render`) bypasses the persistent cache
+for a single invocation.
+
+### 17.6 JSON `@select`
+
+For JSON sources, `@select` walks a dot-path before passing the result to
+`pd.DataFrame`:
+
+| Selector form | Operation                                |
+|---------------|------------------------------------------|
+| `a.b.c`       | `obj['a']['b']['c']` (object keys)       |
+| `items[2]`    | `obj['items'][2]` (array index)          |
+| `data.records[0].fields` | mixed traversal              |
+
+The selected value should be:
+* a list of dicts → becomes a multi-row DataFrame (typical case),
+* a single dict → becomes a one-row DataFrame,
+* a list of scalars → becomes a one-column `value` DataFrame.
+
+### 17.7 Multi-Sheet Support
+
+Each `--- data:name ---` section has its own directive block:
+
+```
+--- data:sales ---
+@source: https://api/sales.csv
+Region,Total
+Inline,0
+
+--- data:targets ---
+@source: file://./targets.csv
+```
+
+`load_dataframes(doc, allow_remote=...)` resolves all sheets in one pass.
+
+### 17.8 CLI Integration
+
+```bash
+# Fetch enabled
+gridlang run report.grid --allow-remote
+
+# Force cache miss
+gridlang render dashboard.grid --allow-remote --no-cache -o out.html
+
+# Live preview with remote fetch
+gridlang serve dashboard.grid --allow-remote
+```
+
+`gridlang validate` and `gridlang info` print declared `@source` URLs without
+fetching them, so static checks remain network-free.
+
+### 17.9 Programmatic API
+
+```python
+from gridlang.parser import parse_file
+from gridlang.data_sources import load_dataframes
+
+doc = parse_file('report.grid')
+sheets, source_labels = load_dataframes(doc, allow_remote=True)
+print(source_labels)  # {'default': 'remote:https://api/x.csv'}
+```
+
+## 18. Reactive Bindings (v0.5)
+
+The reactive bindings layer makes individual cells in the data section editable
+from the rendered preview. Edits made in the browser are POSTed back to the
+local server, applied in-place to the `.grid` source, and trigger a re-render.
+
+### 18.1 Two binding forms
+
+#### Inline `cell()` helper
+
+```html
+<td>{{ cell("B2") }}</td>
+<td>{{ cell("B2@sales") }}</td>          <!-- cross-sheet -->
+<td>{{ cell("B2", fmt=",.2f") }}</td>     <!-- formatted -->
+<td>{{ cell("B2", editable=False) }}</td> <!-- read-only span -->
+```
+
+The helper resolves the cell value from the **raw** data section (not the
+post-compute DataFrame), so edits round-trip predictably even when `transform()`
+is non-trivial.  It emits:
+
+```html
+<span data-grid-cell="B2" class="grid-cell"
+      contenteditable="true" role="textbox" spellcheck="false">100</span>
+```
+
+The header row (row 1) is always rendered read-only, regardless of `editable=`.
+Out-of-range or unknown-sheet references render as `<span class="grid-cell-error">#REF!</span>`.
+
+#### `bind:` DSL block
+
+Form-style binding, parallel to `chart:` and `format:`:
+
+```
+bind: input
+  cell: B2
+  label: "Unit Price"
+  type: number
+  min: 0
+  step: 0.10
+
+bind: select
+  cell: A2
+  label: "Region"
+  options: North, South, East, West
+
+bind: checkbox
+  cell: D2
+
+bind: textarea
+  cell: E2
+  placeholder: "Notes..."
+```
+
+Supported kinds: `input`, `select`, `checkbox`, `textarea`. The `cell:` key is
+mandatory; everything else is optional. Validation happens at preprocess time
+— a malformed A1 reference fails fast, never at edit time.
+
+### 18.2 A1 cell reference grammar
+
+```
+ref       := col_letters digit+ ("@" sheet_name)?
+col_letters := [A-Z]+         (case-insensitive; A=1, B=2, ..., AA=27)
+digit     := [0-9]            (1-based; row 1 is the header)
+sheet_name := [A-Za-z][\w]*    (Python identifier)
+```
+
+Cell ranges (`B2:D4`) are reserved for chart DSL and **not** accepted in
+bindings — only single cells.
+
+### 18.3 Wire protocol
+
+**Endpoint:** `POST /api/cell-edit`
+
+**Request (A1 form):**
+```json
+{
+  "cell": "B2",
+  "value": "120",
+  "sheet": null,
+  "save": true
+}
+```
+
+| Field   | Type    | Required | Description                                         |
+|---------|---------|----------|-----------------------------------------------------|
+| `cell`  | string  | yes      | A1 cell reference (`B2` or `B2@sales`)              |
+| `value` | any     | yes      | New cell value; converted to string via `str()`     |
+| `sheet` | string  | no       | Explicit sheet override (wins over `@sheet` in ref) |
+| `save`  | boolean | no       | If true, write the updated source back to disk      |
+| `content` | string | no      | Edit against this content instead of the disk file  |
+
+**Response:**
+```json
+{
+  "content": "<full updated .grid source>",
+  "html":    "<re-rendered HTML fragment>",
+  "error":   null
+}
+```
+
+**Legacy form** (still supported for the existing editor UI):
+```json
+{
+  "content": "...",
+  "row":     0,
+  "col":     "Revenue",
+  "value":   "999"
+}
+```
+
+### 18.4 Server-side edit semantics
+
+`apply_edit()` rewrites **only the target CSV row**. Everything else is
+preserved byte-for-byte:
+
+* meta / compute / present sections — untouched
+* `@directive` blocks (`@source`, `@cache`, etc.) — untouched
+* `#`-prefixed comment lines — untouched
+* blank lines inside the data section — untouched
+* other CSV rows — untouched
+* formulas in other cells of the same row — untouched
+
+The target value is CSV-escaped per RFC 4180: only quoted when it contains
+`,`, `"`, leading/trailing whitespace, or `\n`.
+
+The header row (row 1) is **never** editable; attempts to write to row 1
+raise `BindingError` and return HTTP 400.
+
+### 18.5 Security model
+
+* `gridlang serve` exposes `/api/cell-edit` only when bound to `127.0.0.1`.
+* `save: true` writes the file. The server runs with the user's privileges; do
+  not expose `gridlang serve` to untrusted networks.
+* For preview-only mode (no file writes), pass `save: false` from the client —
+  edits still update the in-memory source for the live preview but never touch
+  disk.
+* The legacy `{content, row, col}` shape lets clients pre-stage an edit chain
+  in memory; the server uses the supplied `content` rather than re-reading
+  disk.
+
+### 18.6 Client-side JS
+
+`gridlang serve --edit` injects `bindings.client_js()` into the preview page.
+The script wires every `[data-grid-cell]` and `[data-grid-bind]` element to
+the API:
+
+* `data-grid-cell` (inline cells) — commit on `blur` or `Enter`; cancel on
+  `Esc`.  Reloads the page after a successful save so the rest of the
+  document re-renders against the new value.
+* `data-grid-bind` (form widgets) — commit on `change`. The wrapper carries
+  `data-grid-bind-current` so the widget initializes to the current value.
+
+### 18.7 Programmatic API
+
+```python
+from gridlang.bindings import apply_edit, parse_a1_ref, preprocess
+
+src = open('report.grid').read()
+
+# Apply a single edit
+new_src = apply_edit(src, cell='B2', value='999')
+new_src = apply_edit(src, cell='B2@sales', value='999')
+
+# Parse an A1 reference
+row, col, sheet = parse_a1_ref('AB10@costs')   # (10, 28, 'costs')
+
+# Pre-scan a present layer for bind: blocks
+result = preprocess(template_text)
+for d in result.bindings:
+    print(d.cell, d.kind, d.label)
+```
+
+### 18.8 Backward compatibility
+
+A `.grid` file that uses neither `cell()` nor `bind:` renders byte-identically
+to v0.4. The `client_js()` script is only injected when the preview HTML
+contains `data-grid-cell` or `data-grid-bind` markers.
+
+## 19. JavaScript Engine (v0.6)
+
+The compute layer can be authored in JavaScript instead of Python by setting
+``engine: javascript`` in the ``meta`` section. The two engines are
+behaviorally equivalent — same hooks, same ``ExecutionResult`` — but JS code
+is executed in a Node subprocess via JSON IPC, isolated from the Python host.
+
+### 19.1 Selecting the engine
+
+```yaml
+--- meta ---
+name: "Quarterly Sales"
+engine: javascript    # or: python (default)
+version: "1.0"
+```
+
+The parser accepts both ``python`` and ``javascript``. Anything else raises
+``ParseError``. Multi-engine documents are not supported — one engine per file.
+
+### 19.2 User-defined hooks
+
+The same four hook names as the Python engine, but written as top-level
+JavaScript functions:
+
+| Hook                      | Signature                  | Purpose                      |
+|---------------------------|----------------------------|------------------------------|
+| `validate(df)`            | returns `string[]`         | non-empty result halts run   |
+| `transform(df)`           | returns `df` (records)     | single-sheet transform       |
+| `transform(sheets)`       | returns `sheets` object    | multi-sheet (param-name dispatch) |
+| `aggregates(df)`          | returns `object`           | KPIs / summary dict          |
+| `conditional_formats()`   | returns `rule[]`            | declarative styling          |
+
+Multi-vs-single-sheet detection mirrors the Python engine: name the first
+parameter ``sheets`` (or ``dfs``) to receive the multi-sheet dict.
+
+### 19.3 Data shape
+
+The DataFrame is exposed as **array-of-records** (one object per row):
+
+```js
+df === [
+  { Region: 'North', Revenue: 100, Profit: 30 },
+  { Region: 'South', Revenue: 200, Profit: 60 }
+]
+```
+
+A small helper API is auto-attached (non-enumerable, so `JSON.stringify(df)`
+remains clean):
+
+| Method                 | Description                                               |
+|------------------------|-----------------------------------------------------------|
+| `df.col(name)`         | array of values for one column                            |
+| `df.sum(name)`         | sum of a numeric column                                   |
+| `df.mean(name)`        | mean of a numeric column                                  |
+| `df.max(name)`         | max of a numeric column                                   |
+| `df.min(name)`         | min of a numeric column                                   |
+| `df.row(i)`            | the i-th record                                           |
+| `df.where(predicate)`  | new df filtered by a row predicate                        |
+| `df.addColumn(n, fn)`  | mutate-in-place; `fn(row, index)` returns the cell value  |
+| `df.columns`           | array of column names                                     |
+| `df.shape`             | `[rows, cols]`                                            |
+
+Returning a plain array of objects is sufficient — the runtime re-wraps it on
+the way out.
+
+### 19.4 Sandbox
+
+The bridge runs user code with ``vm.runInNewContext`` against a curated globals
+object:
+
+* **Available**: `Math`, `JSON`, `Number`, `String`, `Boolean`, `Array`,
+  `Object`, `Date`, `isFinite`, `isNaN`, `parseFloat`, `parseInt`, `Map`, `Set`,
+  `WeakMap`, `WeakSet`, `Symbol`, `Error`/`TypeError`/`RangeError`,
+  `SyntaxError`, `Promise`, plus a no-op `console.{log,warn,error}`.
+* **Blocked**: `require`, `process`, `Buffer`, `setTimeout`, `setImmediate`,
+  `setInterval`, `fs`, `child_process`, `globalThis` (replaced by the sandbox),
+  filesystem and network access.
+* **Memory**: Node is launched with `--max-old-space-size=256` so a runaway
+  allocation cannot starve the host.
+* **CPU**: `vm.runInContext({timeout})` cuts user code at the per-stage
+  timeout (default 5000 ms; override via `GRIDLANG_JS_TIMEOUT_MS`).
+* **Wall clock**: the whole subprocess is killed after
+  `GRIDLANG_JS_PROCESS_TIMEOUT_S` seconds (default 15).
+
+Attempting to use a blocked global raises a ReferenceError, which the bridge
+re-raises as a Python `RuntimeError_` with the original message preserved.
+
+### 19.5 Wire protocol
+
+Internal — implementations may rely on it but `.grid` authors should not. See
+`gridlang/js_runtime.py`. Briefly:
+
+```json
+// stdin
+{ "code": "...", "df": [...], "sheets": {...},
+  "is_multi_sheet": bool, "timeout_ms": 5000 }
+
+// stdout (one line)
+{ "df": [...], "sheets": {...}, "aggregates": {...},
+  "conditional_formats": [...], "validation_messages": [...],
+  "found_functions": [...], "error": null | "<message>" }
+```
+
+### 19.6 Conditional formats
+
+The `conditional_formats()` hook returns a list of plain objects:
+
+```js
+function conditional_formats() {
+  return [
+    { column: 'Growth', rule: 'greater_than', value: 30, style: 'highlight-green' },
+    { column: 'Growth', rule: 'less_than',    value: 0,  style: 'highlight-red'   },
+  ];
+}
+```
+
+Same rule grammar as the Python engine — see §10. The objects are converted
+to runtime `ConditionalFormat` records by the bridge.
+
+### 19.7 When Node is missing
+
+If `node` is not on `$PATH`, the runtime raises
+`gridlang.js_runtime.JsRuntimeUnavailable` (a subclass of `RuntimeError_`).
+The error message points to https://nodejs.org/. Tools that want a graceful
+degradation can catch this exception and fall back to a static rendering.
+
+### 19.8 Programmatic API
+
+```python
+from gridlang.runtime import execute             # engine-aware dispatcher
+from gridlang.js_runtime import execute_js, is_node_available
+
+if is_node_available():
+    result = execute_js(js_code, df)             # direct call
+    # or, route through the dispatcher:
+    result = execute(js_code, df, engine='javascript')
+```
+
+### 19.9 Choosing an engine
+
+| Reason                              | Pick     |
+|-------------------------------------|----------|
+| Default behaviour, full pandas API  | python   |
+| You're sharing with frontend devs   | javascript |
+| You want pure-text dependencies     | javascript (`engine: javascript` requires only Node) |
+| You need numpy / scipy / statsmodels| python   |
+| You'll later run the same code in the browser | javascript |
+
+The two engines are **not** code-compatible — `transform()` in one is not
+runnable by the other. Pick at authoring time and stick with it for the
+lifetime of the file.
+
+## 20. JS Engine — Extended API & Bundling (v0.7)
+
+v0.7 expands the JavaScript engine in three directions: a richer pandas-ish
+helper API on `df`, a CLI command that produces self-contained JS bundles,
+and a clean separation of the JS source files so external consumers (browser
+bundles, custom hosts) can pick up the same runtime.
+
+### 20.1 Expanded df helper API
+
+The helper prelude (loaded from `gridlang/js/df_helpers.js`) now exposes ~25
+methods grouped by purpose. All are non-enumerable so `JSON.stringify(df)`
+remains clean, and chainable where it makes sense.
+
+**Column / row access**
+
+| Method                     | Description                                         |
+|----------------------------|-----------------------------------------------------|
+| `df.col(name)`             | array of values for one column                      |
+| `df.row(i)`                | i-th record                                         |
+| `df.pluck(...names)`       | new df with only the named columns                  |
+| `df.drop(...names)`        | new df without the named columns                    |
+| `df.rename({old: new, …})` | new df with columns renamed                         |
+
+**Aggregations**
+
+| Method                  | Description                                            |
+|-------------------------|--------------------------------------------------------|
+| `df.count()`            | row count                                              |
+| `df.sum(name)`          | sum of a numeric column (skips NaN)                    |
+| `df.mean(name)`         | arithmetic mean                                        |
+| `df.max(name)`          | maximum value, or `null` for empty / all-NaN           |
+| `df.min(name)`          | minimum value, or `null`                               |
+| `df.variance(name)`     | sample variance (n-1 denominator)                      |
+| `df.std(name)`          | sample standard deviation                              |
+| `df.median(name)`       | 50th percentile                                        |
+| `df.quantile(name, q)`  | linear-interpolated quantile, q∈[0,1]                  |
+| `df.describe()`         | per-column `{count, mean, std, min, q25, q50, q75, max}` |
+
+**Filtering / slicing**
+
+| Method                  | Description                                            |
+|-------------------------|--------------------------------------------------------|
+| `df.where(predicate)`   | new df filtered by `(row) => bool`                     |
+| `df.head(n=5)`          | first n rows                                           |
+| `df.tail(n=5)`          | last n rows                                            |
+| `df.slice(start, end)`  | slice by index (Array.prototype.slice semantics)       |
+| `df.distinct(name?)`    | rows unique by one column or by full record           |
+| `df.find(pred)`         | first matching record (or `undefined`)                 |
+| `df.some(pred)`         | true if any row matches                                |
+| `df.every(pred)`        | true if all rows match                                 |
+| `df.none(pred)`         | true if no rows match                                  |
+
+**Sorting / grouping**
+
+| Method                              | Description                                |
+|-------------------------------------|--------------------------------------------|
+| `df.sortBy(name, {desc?})`          | numeric-aware, falls back to string compare |
+| `df.groupBy(name)`                  | object: `{ groupKey: df, … }`              |
+| `df.countBy(name)`                  | object: `{ groupKey: count, … }`           |
+
+**Mutations**
+
+| Method                              | Description                                |
+|-------------------------------------|--------------------------------------------|
+| `df.addColumn(name, fn)`            | add a single column in place               |
+| `df.assign({col: fn, col2: …})`     | add multiple columns at once               |
+
+**Joins**
+
+| Method                                  | Description                                |
+|-----------------------------------------|--------------------------------------------|
+| `df.join(right, key, {rightKey?})`      | inner join on shared key                   |
+| `df.leftJoin(right, key, {rightKey?})`  | left join (missing rights are dropped from row) |
+| `df.concat(other)`                      | row-wise concat                            |
+
+**Conversion / metadata**
+
+| Property / method     | Description                                      |
+|-----------------------|--------------------------------------------------|
+| `df.columns`          | array of column names                            |
+| `df.shape`            | `[rows, cols]`                                   |
+| `df.empty`            | `true` if length is 0                            |
+| `df.toRecords()`      | plain `Array.from(df)`                           |
+| `df.toCSV()`          | RFC-4180-quoted CSV string                       |
+
+### 20.2 The `gridlang js-bundle` command
+
+Bundle a `.grid` file (whose meta declares `engine: javascript`) into a
+self-contained JS file that runs anywhere a JS engine does — without
+gridlang, without Python, without npm.
+
+```bash
+# Default: produce a Node bundle
+gridlang js-bundle report.grid -o bundle.js
+node bundle.js                   # prints pipeline result as JSON
+
+# Browser / Web-Worker bundle
+gridlang js-bundle report.grid --browser -o worker.js
+
+# Smaller (no JSON pretty-printing)
+gridlang js-bundle report.grid --minify -o tight.js
+
+# Stream to stdout (e.g. piped into another tool)
+gridlang js-bundle report.grid | node
+```
+
+#### Node bundle (`--browser` not set)
+
+Embeds:
+
+* the data section (post-`@source` resolution) as `const REQUEST = {...}`
+* `df_helpers.js` (the makeDF prelude)
+* `runtime_pipeline.js` (the engine-agnostic runner)
+* the user's compute layer wrapped in an IIFE that re-exports
+  `validate / transform / aggregates / conditional_formats` to a scope object
+* a `process.stdout.write(JSON.stringify(...))` tail
+
+Running it produces the same JSON that the in-process bridge would produce.
+
+#### Browser bundle (`--browser`)
+
+Same payload, different glue. The IIFE attaches itself to the host (`self`,
+`globalThis`, or `this`), exposes `runGridLangPipeline()` as a callable, and
+listens on `self.addEventListener('message', …)` so the file works as-is when
+loaded in a Worker:
+
+```js
+const blob = new Blob([bundleSource], {type: 'application/javascript'});
+const w = new Worker(URL.createObjectURL(blob));
+w.onmessage = e => render(e.data);
+w.postMessage({});      // run the embedded pipeline
+```
+
+Or as a `<script>` tag for in-page execution:
+
+```html
+<script src="report.bundle.js"></script>
+<script>
+  const result = runGridLangPipeline();
+  console.log(result.aggregates);
+</script>
+```
+
+### 20.3 Source-file layout
+
+The JS runtime sources are no longer inlined as Python strings; they ship
+as plain `.js` files alongside the package:
+
+```
+gridlang/js/
+├── df_helpers.js        — makeDF helper prelude (≈ 200 lines)
+├── runtime_pipeline.js  — engine-agnostic pipeline runner
+└── bridge_node.js       — Node stdin/stdout bridge for in-process calls
+```
+
+These are picked up automatically via package data. External consumers can
+read them via:
+
+```python
+from gridlang.js_runtime import get_helpers_source, get_bridge_source
+from gridlang.js_bundle  import get_pipeline_source
+```
+
+### 20.4 Programmatic API
+
+```python
+from gridlang.js_bundle import bundle_file, bundle_doc
+
+# From disk
+result = bundle_file('report.grid', target='node')
+open('bundle.js', 'w').write(result.source)
+
+# From a parsed document — useful when post-processing the data.
+from gridlang.parser import parse_string
+doc = parse_string(grid_text)
+result = bundle_doc(doc, target='browser', pretty=False)
+```
+
+The returned `BundleResult` carries `source`, `target`, `bytes`, and
+`sheet_count`. `target='browser'` requires the document to declare
+`engine: javascript`; otherwise `bundle_doc` raises `ValueError`.
+
+### 20.5 Determinism
+
+A bundle is deterministic for a given (`.grid` source, gridlang version)
+pair. Two identical `.grid` files produce byte-identical bundles, which means
+bundle artifacts are diff-friendly and content-addressable (e.g. cache them
+by SHA256).
+
+### 20.6 Use cases
+
+* **Frontend hand-off** — give a frontend dev a single `.js` they can drop
+  into their build pipeline; the data and transformation are baked in.
+* **CI without gridlang** — run pipeline checks inside a Node-only image.
+* **Edge deployment** — push the bundle to Cloudflare Workers / Lambda@Edge
+  / Deno Deploy for serverless rendering.
+* **Notebook-free analysis** — compile a `.grid` file once, re-run the
+  bundle with different inputs by overriding `REQUEST` or via
+  `runGridLangPipeline({df: [...]})` in the browser.

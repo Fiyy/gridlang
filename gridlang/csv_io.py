@@ -122,7 +122,7 @@ def export_csv(
         if doc.is_multi_sheet:
             sheets = {name: parse_data(raw_data) for name, raw_data in doc.sheets_raw.items()}
             primary_df = list(sheets.values())[0]
-            result = execute(doc.compute_raw, primary_df, sheets=sheets)
+            result = execute(doc.compute_raw, primary_df, sheets=sheets, engine=doc.engine)
 
             if sheet and sheet in result.sheets:
                 df = result.sheets[sheet]
@@ -130,7 +130,7 @@ def export_csv(
                 df = result.df
         else:
             primary_df = parse_data(doc.data_raw)
-            result = execute(doc.compute_raw, primary_df)
+            result = execute(doc.compute_raw, primary_df, engine=doc.engine)
             df = result.df
 
     # Write CSV
@@ -160,11 +160,11 @@ def export_csv_string(
         if doc.is_multi_sheet:
             sheets = {name: parse_data(raw_data) for name, raw_data in doc.sheets_raw.items()}
             primary_df = list(sheets.values())[0]
-            result = execute(doc.compute_raw, primary_df, sheets=sheets)
+            result = execute(doc.compute_raw, primary_df, sheets=sheets, engine=doc.engine)
             df = result.sheets.get(sheet, result.df) if sheet else result.df
         else:
             primary_df = parse_data(doc.data_raw)
-            result = execute(doc.compute_raw, primary_df)
+            result = execute(doc.compute_raw, primary_df, engine=doc.engine)
             df = result.df
 
     return df.to_csv(index=False)

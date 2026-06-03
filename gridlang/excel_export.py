@@ -76,7 +76,7 @@ def export_excel(
     primary_df = list(sheets_data.values())[0]
 
     # Execute compute
-    result = execute(doc.compute_raw, primary_df, sheets=sheets_data)
+    result = execute(doc.compute_raw, primary_df, sheets=sheets_data, engine=doc.engine)
 
     # Write to Excel
     out_path = Path(output_path)

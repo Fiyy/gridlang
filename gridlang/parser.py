@@ -38,6 +38,10 @@ class GridDocument:
     # Multi-sheet data: name → raw CSV content
     sheets_raw: dict[str, str] = field(default_factory=dict)
 
+    # Multi-sheet remote-source specs: name → DataSourceSpec
+    # (populated when a data section starts with @directive lines)
+    data_specs: dict = field(default_factory=dict)
+
     # Parsed meta as dict
     meta: dict = field(default_factory=dict)
 
@@ -226,7 +230,11 @@ def _parse_content(content: str, source_path: Optional[Path]) -> GridDocument:
 
     # Handle multi-sheet data
     sheets_raw: dict[str, str] = {}
+    data_specs: dict = {}
     primary_data_raw = ""
+
+    # Lazy import to avoid circular dependency
+    from gridlang.data_sources import parse_directives, DataSourceSpec, DataSourceError
 
     if len(data_sections) == 1:
         # Single data section
@@ -236,8 +244,13 @@ def _parse_content(content: str, source_path: Optional[Path]) -> GridDocument:
             sheet_name = full_name.split(':', 1)[1]
         else:
             sheet_name = 'default'
-        sheets_raw[sheet_name] = data_content
-        primary_data_raw = data_content
+        try:
+            spec, body = parse_directives(data_content)
+        except DataSourceError as e:
+            raise ParseError(f"Invalid @directive in data section: {e}")
+        sheets_raw[sheet_name] = body
+        data_specs[sheet_name] = spec
+        primary_data_raw = body
     else:
         # Multiple data sections
         for full_name, _ in data_sections:
@@ -246,7 +259,12 @@ def _parse_content(content: str, source_path: Optional[Path]) -> GridDocument:
                 sheet_name = full_name.split(':', 1)[1]
             else:
                 sheet_name = 'default'
-            sheets_raw[sheet_name] = data_content
+            try:
+                spec, body = parse_directives(data_content)
+            except DataSourceError as e:
+                raise ParseError(f"Invalid @directive in data:{sheet_name}: {e}")
+            sheets_raw[sheet_name] = body
+            data_specs[sheet_name] = spec
         # Primary data is the first sheet
         primary_data_raw = list(sheets_raw.values())[0] if sheets_raw else ""
 
@@ -257,6 +275,7 @@ def _parse_content(content: str, source_path: Optional[Path]) -> GridDocument:
         compute_raw=sections_content.get('compute', ''),
         present_raw=sections_content.get('present', ''),
         sheets_raw=sheets_raw,
+        data_specs=data_specs,
         meta=meta,
         source_path=source_path,
     )
@@ -272,9 +291,9 @@ def _validate_meta(meta: dict) -> None:
         raise ParseError(f"Meta section missing required fields: {', '.join(sorted(missing))}")
 
     # Validate engine
-    supported_engines = {'python'}
+    supported_engines = {'python', 'javascript'}
     engine = meta.get('engine', '')
     if engine not in supported_engines:
         raise ParseError(
-            f"Unsupported engine '{engine}'. Supported: {', '.join(supported_engines)}"
+            f"Unsupported engine '{engine}'. Supported: {', '.join(sorted(supported_engines))}"
         )

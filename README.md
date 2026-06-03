@@ -101,6 +101,19 @@ Launch a live-preview web server with auto-reload on file changes.
 gridlang serve dashboard.grid --port 8080
 ```
 
+### `gridlang js-bundle`
+
+Bundle a JavaScript-engine `.grid` file into a self-contained `.js` that runs
+anywhere a JS engine does — Node, browser, Web Worker, edge function. The
+bundle embeds the data, helpers, pipeline runner, and your compute code; no
+gridlang or Python at runtime.
+
+```bash
+gridlang js-bundle report.grid -o report.bundle.js   # Node bundle
+gridlang js-bundle report.grid --browser -o worker.js  # Worker bundle
+node report.bundle.js                                # prints JSON
+```
+
 ## Excel vs GridLang
 
 | Dimension | Excel (.xlsx) | GridLang (.grid) |
@@ -111,7 +124,11 @@ gridlang serve dashboard.grid --port 8080
 | Charts | GUI-only creation | Declarative, inline SVG |
 | Multi-sheet | Tab-based UI | `--- data:name ---` sections |
 | Conditional formatting | Dialog-heavy | Inline rules |
-| Testability | Nearly impossible | Standard unit tests (147 tests) |
+| Remote data | Manual import / Power Query | `@source: <url>` directive |
+| Reactive editing | VBA macros / OLE | `{{ cell("B2") }}` + `bind:` form widgets |
+| Compute language | VBA + 400 functions | Python or JavaScript (`engine:` selector) |
+| Bundle for browser | Closed-source COM/OLE | `gridlang js-bundle --browser` produces a Web Worker |
+| Testability | Nearly impossible | Standard unit tests (378 tests) |
 | Interop | Locked ecosystem | Import/export Excel & CSV |
 
 ## Feature Highlights
@@ -130,7 +147,8 @@ Excel-compatible syntax — works the way you already know.
 
 ### 9 SVG Chart Types
 
-Declarative charts rendered as clean SVG.
+Declarative charts rendered as clean SVG. Use either the **Chart DSL** block syntax
+(preferred, AI-friendly) or call the helpers directly with `{{ bar_chart(...) }}`.
 
 ```
 --- present ---
@@ -149,6 +167,10 @@ chart: sparkline
 ```
 
 Supported types: `bar`, `line`, `pie`, `scatter`, `area`, `stacked_bar`, `heatmap`, `sparkline`, `color_scale`
+
+References inside DSL blocks (`Revenue` → column, `agg.foo` → aggregate,
+`B2:D4` → A1 range, `Q1,Q2,Q3` → multi-series, `sales!Revenue` → cross-sheet)
+all resolve automatically. See [`spec/SPEC.md` §16](spec/SPEC.md) for the full grammar.
 
 ### Multi-Sheet Support
 
@@ -181,6 +203,73 @@ format: rules
   rule: "<60 -> italic red"
 ```
 
+### Remote Data Sources
+
+Load data from URLs or local files instead of (or in addition to) inline CSV.
+Inline rows act as a fallback when the remote source is unavailable or
+`--allow-remote` is not given.
+
+```
+--- data ---
+@source: https://api.example.com/sales.json
+@format: json
+@select: data.records
+@cache: 1h
+@header: Authorization: Bearer xyz
+
+# Fallback used when the remote is denied / fails
+Region,Total
+North,100
+```
+
+```bash
+gridlang run report.grid                  # uses inline fallback
+gridlang run report.grid --allow-remote   # fetches the URL
+```
+
+Supported schemes: `file://` (always allowed), `http(s)://` (opt-in via
+`--allow-remote`). Format auto-detected from the URL extension; `csv`/`tsv`/
+`json`/`xlsx` are supported. JSON `@select` drills into a sub-path with
+`a.b.c[0]` syntax. See [`spec/SPEC.md` §17](spec/SPEC.md) for the full directive table.
+
+### Reactive Bindings
+
+Make individual cells editable from the rendered preview. Edits go directly
+back into the `.grid` source and trigger a re-render — like a tiny
+spreadsheet, but the source-of-truth stays in plain text.
+
+**Inline cell binding** with the `cell()` Jinja helper:
+
+```html
+<td>{{ cell("B2") }}</td>            <!-- editable cell -->
+<td>{{ cell("B2", fmt=",.2f") }}</td> <!-- formatted -->
+<td>{{ cell("B2@sales") }}</td>      <!-- cross-sheet -->
+```
+
+**Form-style binding** with `bind:` blocks:
+
+```
+bind: input
+  cell: B2
+  label: "Unit Price"
+  type: number
+  step: 0.10
+
+bind: select
+  cell: A2
+  options: North, South, East, West
+```
+
+```bash
+gridlang serve dashboard.grid --port 8080 --edit
+# Open http://localhost:8080 — click a cell, type, blur to commit.
+```
+
+The server's `POST /api/cell-edit` endpoint accepts `{cell: "B2", value: ...}`
+and rewrites only the target row, preserving comments, blank lines,
+`@directives`, and formulas in other cells. Header rows are read-only.
+See [`spec/SPEC.md` §18](spec/SPEC.md) for the full grammar and protocol.
+
 ### Excel Import with Formula Conversion
 
 Converts Excel formulas and structure to GridLang equivalents automatically.
@@ -209,6 +298,75 @@ def transform(df):
     return df
 ```
 
+### JavaScript Compute Engine
+
+Set `engine: javascript` in the meta section to author the compute layer in JS.
+Useful when you're sharing `.grid` files with frontend codebases or want the
+compute layer to be runnable by both Python and Node tooling.
+
+```
+--- meta ---
+name: "Q1 Sales"
+engine: javascript
+version: "1.0"
+
+--- compute ---
+function transform(df) {
+  df.addColumn('Tax', r => r.Revenue * 0.2);
+  return df;
+}
+function aggregates(df) {
+  return { total: df.sum('Revenue'), tax: df.sum('Tax') };
+}
+```
+
+The DataFrame is exposed as an array of records with a ~25-method helper API
+covering aggregations (`sum`, `mean`, `std`, `quantile`, `describe`),
+filtering (`where`, `head`, `distinct`, `find`), reshaping (`pluck`, `drop`,
+`rename`, `assign`), sorting/grouping (`sortBy`, `groupBy`, `countBy`), joins
+(`join`, `leftJoin`, `concat`), and conversion (`toCSV`, `toRecords`).
+
+```js
+function aggregates(df) {
+  const top3 = df.sortBy('Revenue', { desc: true }).head(3);
+  const byRegion = df.groupBy('Region');
+  const sums = {};
+  for (const k of Object.keys(byRegion)) sums[k] = byRegion[k].sum('Revenue');
+  return {
+    median:    df.median('Revenue'),
+    p90:       df.quantile('Revenue', 0.9),
+    distinct:  df.distinct('Region').count(),
+    top:       top3.col('Product'),
+    by_region: sums,
+  };
+}
+```
+
+User code runs in a Node `vm` sandbox — no `require`, `process`, or filesystem
+access. Requires Node 18+; falls back gracefully via `JsRuntimeUnavailable`
+when Node isn't on PATH. See [`spec/SPEC.md` §19](spec/SPEC.md) and
+[§20](spec/SPEC.md) for the full helper table and bundle format.
+
+### Self-Contained JS Bundles
+
+`gridlang js-bundle` packages a `.grid` file's data + compute layer into a
+single JS file that runs anywhere a JS engine does — without gridlang,
+without Python, without npm.
+
+```bash
+# Node: prints pipeline result as JSON on stdout
+gridlang js-bundle report.grid -o bundle.js
+node bundle.js
+
+# Browser / Web Worker: drop into a <script> or new Worker(blob)
+gridlang js-bundle report.grid --browser -o worker.js
+```
+
+The bundle embeds your data (post-`@source` resolution), the compute code,
+the helper API, and the pipeline runner — verbatim, no minification chain,
+no CDN. Two identical `.grid` files produce byte-identical bundles, so they
+diff cleanly and cache by SHA.
+
 ### Web Preview with Auto-Reload
 
 ```bash
@@ -224,7 +382,13 @@ gridlang/
 │   ├── parser.py          # .grid file parser
 │   ├── schema.py          # data layer validation
 │   ├── runtime.py         # compute engine (sandboxed)
+│   ├── js_runtime.py      # alternative JavaScript compute engine (v0.6)
+│   ├── js_bundle.py       # Node + Web Worker bundle generator (v0.7)
+│   ├── js/                # JS source files (df_helpers, pipeline, bridge)
 │   ├── renderer.py        # HTML/SVG rendering
+│   ├── chart_dsl.py       # chart:/format: DSL preprocessor
+│   ├── data_sources.py    # @source remote data loader + cache
+│   ├── bindings.py        # reactive cell + form bindings (v0.5)
 │   ├── formulas.py        # 59 built-in functions
 │   ├── charts.py          # 9 SVG chart types
 │   ├── excel_import.py    # .xlsx → .grid conversion
@@ -233,8 +397,8 @@ gridlang/
 │   ├── server.py          # live preview server
 │   └── cli.py             # CLI entry point
 ├── spec/SPEC.md           # format specification
-├── examples/              # 7 example .grid files + sample.xlsx
-└── tests/                 # 147 tests
+├── examples/              # 11 example .grid files + sample.xlsx
+└── tests/                 # 378 tests
 ```
 
 ## License

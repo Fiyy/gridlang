@@ -29,6 +29,7 @@ Thumbs.db
 
 # GridLang outputs (generated files)
 examples/output_*.html
+examples/*_preview.html
 examples/*_exported.xlsx
 
 # Temporary

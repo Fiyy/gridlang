@@ -116,6 +116,8 @@ def execute(
     df: pd.DataFrame,
     sheets: Optional[dict[str, pd.DataFrame]] = None,
     extra_modules: Optional[dict[str, Any]] = None,
+    *,
+    engine: str = 'python',
 ) -> ExecutionResult:
     """
     Execute compute layer code against the data.
@@ -136,6 +138,9 @@ def execute(
         df: Input DataFrame from the data layer (primary sheet).
         sheets: Dict of sheet_name → DataFrame for multi-sheet mode.
         extra_modules: Additional modules to make available.
+        engine: 'python' (default) or 'javascript' — selects the compute engine.
+                'javascript' requires Node 18+ on PATH; user code is run inside
+                a Node vm sandbox via gridlang.js_runtime.
 
     Returns:
         ExecutionResult with transformed df, sheets, aggregates, and metadata.
@@ -143,6 +148,14 @@ def execute(
     Raises:
         RuntimeError_: If execution fails at any stage.
     """
+    if engine == 'javascript' or engine == 'js':
+        # Lazy import to avoid the subprocess overhead and keep `import gridlang`
+        # cheap when JS isn't in use.
+        from gridlang.js_runtime import execute_js
+        return execute_js(compute_code, df, sheets=sheets)
+    if engine not in ('python', 'py', ''):
+        raise RuntimeError_(f"Unsupported compute engine: {engine!r}")
+
     if not compute_code.strip():
         result_sheets = sheets or {'default': df.copy()}
         return ExecutionResult(

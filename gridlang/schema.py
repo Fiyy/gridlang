@@ -35,6 +35,8 @@ def parse_data(csv_content: str) -> pd.DataFrame:
       - Boolean (true/false, yes/no) → bool
       - Everything else → string (object)
 
+    Lines starting with `#` are skipped as comments.
+
     Args:
         csv_content: Raw CSV string from the data section.
 
@@ -44,9 +46,20 @@ def parse_data(csv_content: str) -> pd.DataFrame:
     if not csv_content.strip():
         return pd.DataFrame()
 
+    # Strip lines that start with `#` so inline notes / fallback markers don't
+    # become rogue rows. Quoted strings inside cells are unaffected — only
+    # whole lines whose first non-whitespace character is `#` are dropped.
+    cleaned_lines = [
+        line for line in csv_content.splitlines()
+        if not line.lstrip().startswith('#')
+    ]
+    if not cleaned_lines:
+        return pd.DataFrame()
+    cleaned = '\n'.join(cleaned_lines)
+
     # Parse CSV
     df = pd.read_csv(
-        io.StringIO(csv_content),
+        io.StringIO(cleaned),
         skipinitialspace=True,
         na_values=['', 'NA', 'N/A', 'null', 'None'],
     )

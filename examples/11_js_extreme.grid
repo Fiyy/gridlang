@@ -1,0 +1,172 @@
+--- meta ---
+name: "JS Engine — Pushed to the Limit"
+version: "1.0"
+engine: javascript
+
+--- data:sales ---
+Region,Product,Quarter,Units,UnitPrice
+North,Widget,Q1,120,9.50
+North,Widget,Q2,135,9.50
+North,Widget,Q3,150,10.00
+North,Widget,Q4,160,10.00
+North,Gadget,Q1,80,12.00
+North,Gadget,Q2,95,12.00
+North,Gadget,Q3,100,12.50
+North,Gadget,Q4,110,12.50
+South,Widget,Q1,90,9.50
+South,Widget,Q2,100,9.50
+South,Widget,Q3,110,10.00
+South,Widget,Q4,120,10.00
+South,Gadget,Q1,55,12.00
+South,Gadget,Q2,65,12.00
+South,Gadget,Q3,75,12.50
+South,Gadget,Q4,85,12.50
+West,Widget,Q1,60,9.50
+West,Widget,Q2,75,9.50
+West,Widget,Q3,90,10.00
+West,Widget,Q4,105,10.00
+
+--- data:targets ---
+Region,Q1Target,Q2Target,Q3Target,Q4Target
+North,2500,2800,3100,3400
+South,1500,1700,2000,2300
+West,650,800,950,1100
+
+--- compute ---
+// Showcase of the v0.7 expanded df API:
+// where, addColumn, sortBy, groupBy, leftJoin, distinct, describe, quantile, std
+
+function transform(sheets) {
+  // Step 1: enrich every row with revenue
+  sheets.sales.addColumn('Revenue', r => r.Units * r.UnitPrice);
+
+  // Step 2: pivot quarterly targets into long-form for the join
+  const longTargets = [];
+  for (const t of sheets.targets) {
+    for (const q of ['Q1', 'Q2', 'Q3', 'Q4']) {
+      longTargets.push({ Region: t.Region, Quarter: q, Target: t[q + 'Target'] });
+    }
+  }
+
+  // Step 3: roll the sales rows up by Region+Quarter
+  const rollupKey = r => r.Region + '|' + r.Quarter;
+  const groups = {};
+  for (const r of sheets.sales) {
+    const k = rollupKey(r);
+    if (!groups[k]) groups[k] = { Region: r.Region, Quarter: r.Quarter, Revenue: 0, Units: 0 };
+    groups[k].Revenue += r.Revenue;
+    groups[k].Units   += r.Units;
+  }
+  const rollup = makeDF(Object.values(groups));
+
+  // Step 4: left-join targets onto the rollup
+  const withTargets = rollup.leftJoin(longTargets, 'Region', { rightKey: 'Region' });
+  // Manual second key — `Region` matched, but we still need `Quarter` to dedupe.
+  // Filter rows where the joined target's Quarter matches the rollup's Quarter.
+  // Since the long-form table has 4 rows per Region, leftJoin would attach the
+  // first matching one; do it properly via index lookup.
+  const targetIdx = {};
+  for (const t of longTargets) targetIdx[t.Region + '|' + t.Quarter] = t.Target;
+
+  const final = makeDF(Array.from(rollup));
+  final.addColumn('Target', r => targetIdx[r.Region + '|' + r.Quarter] || 0);
+  final.addColumn('Achievement', r => r.Target ? +(r.Revenue / r.Target * 100).toFixed(1) : 0);
+
+  return {
+    sales: sheets.sales,
+    targets: sheets.targets,
+    rollup: final.sortBy('Achievement', { desc: true }),
+  };
+}
+
+function aggregates(df) {
+  // df is the primary sheet; we re-derive cross-sheet stats from it.
+  const allRevenue = df.col('Revenue');
+  const stats = df.describe();
+
+  // Pre-compute label/value pairs as parallel arrays so chart DSL can plot them.
+  const byRegion = (function() {
+    const g = df.groupBy('Region');
+    const labels = Object.keys(g);
+    const values = labels.map(k => g[k].sum('Revenue'));
+    return { labels, values };
+  })();
+  const byProduct = (function() {
+    const g = df.groupBy('Product');
+    const labels = Object.keys(g);
+    const values = labels.map(k => g[k].sum('Revenue'));
+    return { labels, values };
+  })();
+
+  return {
+    total_revenue:  df.sum('Revenue'),
+    total_units:    df.sum('Units'),
+    distinct_regions: df.distinct('Region').count(),
+    distinct_products: df.distinct('Product').count(),
+    revenue_p50: df.quantile('Revenue', 0.5),
+    revenue_p90: df.quantile('Revenue', 0.9),
+    revenue_std: +df.std('Revenue').toFixed(2),
+    region_labels: byRegion.labels,
+    region_values: byRegion.values,
+    product_labels: byProduct.labels,
+    product_values: byProduct.values,
+  };
+}
+
+function conditional_formats() {
+  return [
+    { column: 'Revenue', rule: 'greater_than', value: 1500, style: 'highlight-green' },
+    { column: 'Revenue', rule: 'less_than',    value: 700,  style: 'highlight-red' },
+  ];
+}
+
+--- present ---
+<h1>{{ meta.name }}</h1>
+<p><em>Compute engine: JavaScript (Node) — using ~15 df-helper methods</em></p>
+
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="kpi-value">${{ "{:,.0f}".format(agg.total_revenue) }}</div>
+    <div class="kpi-label">Total Revenue</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ "{:,}".format(agg.total_units) }}</div>
+    <div class="kpi-label">Total Units</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.distinct_regions }}</div>
+    <div class="kpi-label">Regions</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">${{ "{:,.0f}".format(agg.revenue_p90) }}</div>
+    <div class="kpi-label">90th-pct revenue</div>
+  </div>
+</div>
+
+<h2>Rollup vs Targets</h2>
+{% set rollup = sheets['rollup'] %}
+<table>
+  <thead><tr><th>Region</th><th>Quarter</th><th>Revenue</th><th>Units</th><th>Target</th><th>Achievement</th></tr></thead>
+  <tbody>
+    {% for row in rollup.to_dict('records') %}
+    <tr>
+      <td>{{ row.Region }}</td>
+      <td>{{ row.Quarter }}</td>
+      <td class="number {{ cond_class('Revenue', row.Revenue) }}">${{ "{:,.0f}".format(row.Revenue) }}</td>
+      <td class="number">{{ row.Units }}</td>
+      <td class="number">${{ "{:,.0f}".format(row.Target) }}</td>
+      <td class="number">{{ row.Achievement }}%</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+chart: bar
+  data: agg.region_values
+  labels: agg.region_labels
+  title: "Revenue by Region"
+
+chart: pie
+  data: agg.product_values
+  labels: agg.product_labels
+  title: "Revenue by Product"

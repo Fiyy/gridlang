@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gridlang"
-version = "0.2.0"
+version = "0.7.0"
 description = "AI-native spreadsheet file format: data + compute + presentation in one file"
 readme = "README.md"
 license = {text = "MIT"}
@@ -29,6 +29,9 @@ gridlang = "gridlang.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["gridlang*"]
+
+[tool.setuptools.package-data]
+gridlang = ["js/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

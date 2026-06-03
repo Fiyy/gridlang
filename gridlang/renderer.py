@@ -21,6 +21,12 @@ import numpy as np
 from jinja2 import Environment, BaseLoader, TemplateSyntaxError, UndefinedError
 
 from gridlang.charts import get_all_charts
+from gridlang.chart_dsl import preprocess as preprocess_dsl
+from gridlang.bindings import (
+    preprocess as preprocess_bindings,
+    make_cell_helper,
+    BINDING_STYLES,
+)
 from gridlang.runtime import ConditionalFormat
 
 
@@ -112,6 +118,20 @@ def render(
     if not template_content.strip():
         template_content = _generate_default_template(df, aggregates, sheets)
 
+    # Preprocess GridLang DSL blocks (chart: / format:) → Jinja2 calls + ConditionalFormat objects.
+    dsl_result = preprocess_dsl(template_content)
+    template_content = dsl_result.template
+
+    # Preprocess `bind:` blocks → HTML form widgets that point at /api/cell-edit.
+    bind_result = preprocess_bindings(template_content)
+    template_content = bind_result.template
+    has_bindings = bool(bind_result.bindings) or _has_inline_cell(template_content)
+
+    # Merge DSL-declared format directives with runtime conditional_formats.
+    cf_rules: list[ConditionalFormat] = list(conditional_formats or [])
+    for fd in dsl_result.formats:
+        cf_rules.append(ConditionalFormat(**fd.to_runtime_dict()))
+
     # Set up Jinja2 environment
     env = Environment(
         loader=BaseLoader(),
@@ -124,8 +144,20 @@ def render(
     env.globals.update(_get_helpers())
     env.globals.update(get_all_charts())
 
+    # A1-range helpers used by chart-DSL emitted code.
+    env.globals['_a1_range'] = _a1_range
+    env.globals['_a1_range_df'] = _a1_range_df
+    env.globals['_a1_cell'] = _a1_cell
+
+    # Bindings: `cell()` Jinja helper for inline cell binding. Reads from RAW
+    # data (not the post-compute df) so edits round-trip predictably.
+    raw_lookup = raw_df if raw_df is not None else df
+    sheets_for_bind = sheets or {'default': raw_lookup}
+    # If sheets are post-compute, prefer raw versions when available — but the
+    # caller may not pass us raw_sheets, in which case we use whatever we have.
+    env.globals['cell'] = make_cell_helper(sheets_for_bind, default_sheet='default')
+
     # Add conditional format helper
-    cf_rules = conditional_formats or []
     env.globals['cond_style'] = lambda col, value: _apply_conditional_format(col, value, cf_rules)
     env.globals['cond_class'] = lambda col, value: _apply_conditional_class(col, value, cf_rules)
 
@@ -161,6 +193,10 @@ def render(
         if cf_rules:
             styles += _generate_conditional_css(cf_rules, df)
 
+        # Add binding-cell + bind-input styles when the template uses them.
+        if has_bindings:
+            styles += BINDING_STYLES
+
         wrapper_env = Environment(loader=BaseLoader(), autoescape=False)
         wrapper = wrapper_env.from_string(HTML_TEMPLATE)
         rendered = wrapper.render(
@@ -170,6 +206,11 @@ def render(
         )
 
     return rendered
+
+
+def _has_inline_cell(template: str) -> bool:
+    """Cheap pre-render check: does the template invoke the `cell(` helper?"""
+    return 'cell(' in template
 
 
 def _generate_default_template(
@@ -404,3 +445,40 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     if len(h) == 3:
         h = ''.join(c * 2 for c in h)
     return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+# =============================================================================
+# A1 Range Helpers (used by Chart DSL emitted Jinja expressions)
+# =============================================================================
+
+def _a1_range(target, row_start: int, col_start: int, row_end: int, col_end: int) -> list:
+    """
+    Slice a DataFrame using row/col indices already adjusted by the DSL parser
+    (data row 0 = first row after header). Returns a flat list.
+
+    `target` may be a DataFrame or a dict-of-DataFrames (sheets); for sheets,
+    the DSL passes the sheet directly already.
+    """
+    if target is None or len(target) == 0:
+        return []
+    sub = target.iloc[row_start:row_end, col_start:col_end]
+    # If it's a single column, return a 1-D list. Otherwise flatten.
+    if sub.shape[1] == 1:
+        return sub.iloc[:, 0].tolist()
+    if sub.shape[0] == 1:
+        return sub.iloc[0, :].tolist()
+    return sub.values.flatten().tolist()
+
+
+def _a1_cell(target, row: int, col: int):
+    """Return a single cell value from a DataFrame using DSL-adjusted indices."""
+    if target is None or len(target) == 0:
+        return None
+    return target.iloc[row, col]
+
+
+def _a1_range_df(target, row_start: int, col_start: int, row_end: int, col_end: int):
+    """Slice a DataFrame and return the slice (used by heatmap which wants a DataFrame)."""
+    if target is None or len(target) == 0:
+        return target
+    return target.iloc[row_start:row_end, col_start:col_end]

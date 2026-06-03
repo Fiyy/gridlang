@@ -188,7 +188,7 @@ name: "Test"
     def test_unsupported_engine(self):
         content = """--- meta ---
 name: "Test"
-engine: javascript
+engine: ruby
 version: "1.0"
 
 --- data ---
@@ -199,6 +199,22 @@ version: "1.0"
 """
         with pytest.raises(ParseError, match="Unsupported engine"):
             parse_string(content)
+
+    def test_javascript_engine_accepted(self):
+        # Added in v0.6 — `engine: javascript` is now supported alongside python.
+        content = """--- meta ---
+name: "Test"
+engine: javascript
+version: "1.0"
+
+--- data ---
+
+--- compute ---
+
+--- present ---
+"""
+        doc = parse_string(content)
+        assert doc.engine == 'javascript'
 
     def test_invalid_yaml(self):
         content = """--- meta ---
