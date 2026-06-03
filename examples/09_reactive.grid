@@ -1,0 +1,110 @@
+--- meta ---
+name: "Reactive Dashboard"
+version: "1.0"
+engine: python
+
+--- data ---
+Region,Units,Price,Discount
+North,120,9.50,0
+South,90,9.50,5
+West,75,9.50,10
+East,110,9.50,0
+
+--- compute ---
+def transform(df):
+    df['Revenue'] = df['Units'] * df['Price'] * (1 - df['Discount'] / 100)
+    return df
+
+def aggregates(df):
+    return {
+        'total_units': int(df['Units'].sum()),
+        'total_revenue': round(float(df['Revenue'].sum()), 2),
+        'avg_discount': round(float(df['Discount'].mean()), 1),
+    }
+
+--- present ---
+<h1>{{ meta.name }}</h1>
+
+<p>
+  <strong>This dashboard is editable.</strong> Click any highlighted cell to change
+  it, or use the form below. Edits go straight back into the data section.
+  Run <code>gridlang serve 09_reactive.grid --port 8080 --edit</code> to see it
+  live.
+</p>
+
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.total_units }}</div>
+    <div class="kpi-label">Total Units</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">${{ "{:,.2f}".format(agg.total_revenue) }}</div>
+    <div class="kpi-label">Total Revenue</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.avg_discount }}%</div>
+    <div class="kpi-label">Avg Discount</div>
+  </div>
+</div>
+
+<h2>Editable Cells (inline)</h2>
+<table>
+  <thead>
+    <tr><th>Region</th><th>Units</th><th>Price</th><th>Discount %</th><th>Revenue</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>{{ cell("A2") }}</td>
+      <td class="number">{{ cell("B2") }}</td>
+      <td class="number">{{ cell("C2") }}</td>
+      <td class="number">{{ cell("D2") }}</td>
+      <td class="number">{{ "{:,.2f}".format(df.iloc[0]['Revenue']) }}</td>
+    </tr>
+    <tr>
+      <td>{{ cell("A3") }}</td>
+      <td class="number">{{ cell("B3") }}</td>
+      <td class="number">{{ cell("C3") }}</td>
+      <td class="number">{{ cell("D3") }}</td>
+      <td class="number">{{ "{:,.2f}".format(df.iloc[1]['Revenue']) }}</td>
+    </tr>
+    <tr>
+      <td>{{ cell("A4") }}</td>
+      <td class="number">{{ cell("B4") }}</td>
+      <td class="number">{{ cell("C4") }}</td>
+      <td class="number">{{ cell("D4") }}</td>
+      <td class="number">{{ "{:,.2f}".format(df.iloc[2]['Revenue']) }}</td>
+    </tr>
+    <tr>
+      <td>{{ cell("A5") }}</td>
+      <td class="number">{{ cell("B5") }}</td>
+      <td class="number">{{ cell("C5") }}</td>
+      <td class="number">{{ cell("D5") }}</td>
+      <td class="number">{{ "{:,.2f}".format(df.iloc[3]['Revenue']) }}</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Form Bindings (bind: blocks)</h2>
+
+bind: input
+  cell: C2
+  label: "North price"
+  type: number
+  step: 0.10
+
+bind: input
+  cell: D2
+  label: "North discount %"
+  type: number
+  min: 0
+  max: 100
+
+bind: select
+  cell: A2
+  label: "North region label"
+  options: North, Northeast, Northwest, "North America"
+
+chart: bar
+  data: B2:B5
+  labels: A2:A5
+  title: "Units by Region"
