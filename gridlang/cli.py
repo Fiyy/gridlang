@@ -356,20 +356,51 @@ def cmd_validate(args):
         else:
             print("  ○ Schema validation: skipped (no schema defined)")
 
-    # Step 4: Compute syntax check
+    # Step 4: Compute syntax check (engine-aware)
     if doc.compute_raw.strip():
-        try:
-            compile(doc.compute_raw, '<compute>', 'exec')
-            print("  ✓ Compute layer: valid Python syntax")
-        except SyntaxError as e:
-            errors.append(f"Compute syntax error (line {e.lineno}): {e.msg}")
+        engine = doc.engine
+        if engine == 'javascript':
+            # Python's `compile()` would (correctly) reject JS source. Validate
+            # the JS via Node's `--check` if Node is available; otherwise just
+            # note that we're skipping the syntax pass.
+            import shutil, subprocess
+            node = shutil.which('node')
+            if node:
+                try:
+                    proc = subprocess.run(
+                        [node, '--check', '-'],
+                        input=doc.compute_raw,
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if proc.returncode == 0:
+                        print("  ✓ Compute layer: valid JavaScript syntax")
+                    else:
+                        # Node prints the line number on stderr; surface that.
+                        msg = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else 'syntax error'
+                        errors.append(f"Compute syntax error (JavaScript): {msg}")
+                except (subprocess.TimeoutExpired, OSError) as e:
+                    warnings.append(f"Could not invoke Node to check JS syntax: {e}")
+            else:
+                print("  ○ Compute layer: JavaScript (node not on PATH; syntax check skipped)")
 
-        # Check for dangerous patterns
-        dangerous_patterns = ['os.system', 'subprocess', 'open(', '__import__',
-                             'exec(', 'eval(', 'shutil']
-        for pattern in dangerous_patterns:
-            if pattern in doc.compute_raw:
-                warnings.append(f"Potentially unsafe pattern in compute: '{pattern}'")
+            # The Python "dangerous patterns" list doesn't apply to JS.
+            js_dangerous = ['require(', 'process.exit', 'eval(', 'Function(', 'child_process']
+            for pattern in js_dangerous:
+                if pattern in doc.compute_raw:
+                    warnings.append(f"Potentially unsafe pattern in compute (JS): '{pattern}'")
+        else:
+            try:
+                compile(doc.compute_raw, '<compute>', 'exec')
+                print("  ✓ Compute layer: valid Python syntax")
+            except SyntaxError as e:
+                errors.append(f"Compute syntax error (line {e.lineno}): {e.msg}")
+
+            # Check for dangerous patterns
+            dangerous_patterns = ['os.system', 'subprocess', 'open(', '__import__',
+                                 'exec(', 'eval(', 'shutil']
+            for pattern in dangerous_patterns:
+                if pattern in doc.compute_raw:
+                    warnings.append(f"Potentially unsafe pattern in compute: '{pattern}'")
     else:
         print("  ○ Compute layer: empty (pass-through)")
 
