@@ -1,8 +1,13 @@
 # GridLang
 
+[![tests](https://github.com/Fiyy/gridlang/actions/workflows/test.yml/badge.svg)](https://github.com/Fiyy/gridlang/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![Latest release](https://img.shields.io/github/v/release/Fiyy/gridlang)](https://github.com/Fiyy/gridlang/releases)
+
 **The AI-native spreadsheet format — data, formulas, and visualization in a single plain-text file.**
 
-GridLang is to Excel what Markdown is to Word: a human-readable, version-controllable, AI-friendly format that captures the full power of spreadsheets — 59 formulas, 9 chart types, conditional formatting — without the binary blob.
+GridLang is to Excel what Markdown is to Word: a human-readable, version-controllable, AI-friendly format that captures the full power of spreadsheets — 59 formulas, 9 chart types, conditional formatting, JS/Python compute engines, real-time CRDT collaboration — without the binary blob.
 
 ## Quick Install
 
@@ -443,4 +448,4 @@ gridlang/
 
 ## License
 
-MIT
+[MIT](LICENSE) — see also [`CHANGELOG.md`](CHANGELOG.md) for the version history.

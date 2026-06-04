@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gridlang"
-version = "0.8.0"
+version = "1.0.0"
 description = "AI-native spreadsheet file format: data + compute + presentation in one file"
 readme = "README.md"
 license = {text = "MIT"}

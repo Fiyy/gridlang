@@ -31,7 +31,7 @@ def main():
         prog='gridlang',
         description='GridLang — AI-native spreadsheet format toolkit',
     )
-    parser.add_argument('--version', action='version', version='gridlang 0.8.0')
+    parser.add_argument('--version', action='version', version='gridlang 1.0.0')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 

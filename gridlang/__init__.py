@@ -4,7 +4,7 @@ GridLang - AI-Native Spreadsheet Format
 Data + Compute + Presentation in a single .grid file.
 """
 
-__version__ = "0.8.0"
+__version__ = "1.0.0"
 
 from gridlang.parser import parse, GridDocument
 from gridlang.runtime import execute
