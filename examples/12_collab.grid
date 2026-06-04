@@ -1,0 +1,94 @@
+--- meta ---
+name: "Q1 Sales — Collaborative"
+version: "1.0"
+engine: python
+
+--- data ---
+Region,Q1,Q2,Q3,Q4
+North,120,135,150,160
+South,90,95,110,125
+West,60,75,90,105
+
+--- compute ---
+def transform(df):
+    df['Total'] = df['Q1'] + df['Q2'] + df['Q3'] + df['Q4']
+    df['Avg'] = (df['Total'] / 4).round(1)
+    return df
+
+def aggregates(df):
+    return {
+        'grand_total': int(df['Total'].sum()),
+        'top_region':  df.loc[df['Total'].idxmax(), 'Region'],
+        'avg_quarter': round(df[['Q1','Q2','Q3','Q4']].sum().mean(), 1),
+    }
+
+--- present ---
+<h1>{{ meta.name }}</h1>
+<p style="color:#64748b">
+  Quarterly sales by region. Click any cell below to edit live —
+  open this page in two browser tabs and watch edits sync across both.
+</p>
+
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="kpi-value">${{ "{:,}".format(agg.grand_total) }}</div>
+    <div class="kpi-label">Grand Total</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">{{ agg.top_region }}</div>
+    <div class="kpi-label">Top Region</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-value">${{ "{:,}".format(agg.avg_quarter) }}</div>
+    <div class="kpi-label">Avg Quarter</div>
+  </div>
+</div>
+
+<h2>Quarterly Sales</h2>
+<p style="font-size:.85rem;color:#94a3b8">
+  <em>Click any number to edit. With <code>--collab</code>, edits broadcast to all
+  connected tabs. Without it, edits commit to the .grid file directly.</em>
+</p>
+
+<table>
+  <thead>
+    <tr><th>Region</th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>Total</th><th>Avg</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>{{ cell("A2") }}</td>
+      <td class="number">{{ cell("B2") }}</td>
+      <td class="number">{{ cell("C2") }}</td>
+      <td class="number">{{ cell("D2") }}</td>
+      <td class="number">{{ cell("E2") }}</td>
+      <td class="number">{{ df.iloc[0]['Total'] }}</td>
+      <td class="number">{{ df.iloc[0]['Avg'] }}</td>
+    </tr>
+    <tr>
+      <td>{{ cell("A3") }}</td>
+      <td class="number">{{ cell("B3") }}</td>
+      <td class="number">{{ cell("C3") }}</td>
+      <td class="number">{{ cell("D3") }}</td>
+      <td class="number">{{ cell("E3") }}</td>
+      <td class="number">{{ df.iloc[1]['Total'] }}</td>
+      <td class="number">{{ df.iloc[1]['Avg'] }}</td>
+    </tr>
+    <tr>
+      <td>{{ cell("A4") }}</td>
+      <td class="number">{{ cell("B4") }}</td>
+      <td class="number">{{ cell("C4") }}</td>
+      <td class="number">{{ cell("D4") }}</td>
+      <td class="number">{{ cell("E4") }}</td>
+      <td class="number">{{ df.iloc[2]['Total'] }}</td>
+      <td class="number">{{ df.iloc[2]['Avg'] }}</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Try this</h3>
+<ol style="color:#475569">
+  <li><code>gridlang serve examples/12_collab.grid --collab --edit</code></li>
+  <li>Open <a href="http://localhost:8080">http://localhost:8080</a> in two browser tabs.</li>
+  <li>Edit a cell in tab A — within a second, the value appears (and flashes blue) in tab B.</li>
+  <li>Edit the same cell in both tabs at once — the higher-HLC write wins on every replica.</li>
+</ol>

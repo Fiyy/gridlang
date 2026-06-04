@@ -767,7 +767,7 @@ gridlang serve dashboard.grid --port 3000
 - ~~**Remote data sources** — `@source` directive at top of data sections~~ ✓ DONE (v0.4, see §17)
 - ~~**Reactive bindings** — Two-way binding between present layer edits and data layer~~ ✓ DONE (v0.5, see §18)
 - ~~**JavaScript engine** — Alternative compute engine for browser-native execution~~ ✓ DONE (v0.6, see §19)
-- **Collaborative editing** — CRDT-based real-time collaboration protocol
+- ~~**Collaborative editing** — CRDT-based real-time collaboration protocol~~ ✓ DONE (v0.8, see §21)
 
 ## 16. Chart & Format DSL (v0.3)
 
@@ -1572,3 +1572,191 @@ by SHA256).
 * **Notebook-free analysis** — compile a `.grid` file once, re-run the
   bundle with different inputs by overriding `REQUEST` or via
   `runGridLangPipeline({df: [...]})` in the browser.
+
+## 21. Collaborative Editing (v0.8)
+
+GridLang ships with a CRDT-based collaboration layer that lets multiple
+clients edit cells of the same `.grid` file concurrently. Convergence is
+guaranteed — every replica that has seen the same set of operations ends
+up with the same per-cell value, regardless of arrival order.
+
+The implementation lives in three modules:
+
+| Module                       | Responsibility                                  |
+|------------------------------|-------------------------------------------------|
+| `gridlang.crdt`              | HLC clocks + LWW per-cell document + version vectors |
+| `gridlang.collab`            | Server-side `CollabSession` (peers, persistence, sync) |
+| `gridlang.collab_client`     | Self-contained browser JS (`/api/collab/client.js`) |
+
+### 21.1 Data model
+
+Cells form a logical map keyed by `(sheet, row, col)`. Insertions and
+deletions of rows/columns are **out of scope** for v0.8 — GridLang's data
+layer has fixed headers, so the only operation we converge on is "edit
+cell X to value Y".
+
+A single edit is a `CellOp`:
+
+```python
+CellOp(
+    key=CellKey(sheet="", row=2, col=2),    # B2 in the default sheet
+    value=120,
+    hlc=HLC(wall_ms=1700000000000, logical=0, site_id="srv-abc"),
+)
+```
+
+The replica state (`gridlang.crdt.Document`) holds:
+
+* `cells: dict[CellKey, CellOp]` — the current LWW winner per cell.
+* `journal: list[CellOp]` — every op accepted (used for `ops_since`).
+* `clock: HLC` — the local HLC, advanced on every local edit and merged
+  on every remote op.
+
+### 21.2 Hybrid Logical Clock (HLC)
+
+Each `CellOp` carries an HLC tuple `(wall_ms, logical, site_id)` that:
+
+1. **Advances monotonically** on the local replica — two events on the
+   same site are always strictly ordered.
+2. **Survives clock skew** — if a remote op carries a wall timestamp
+   ahead of ours, our clock jumps to match it (and bumps `logical`),
+   so subsequent local edits remain causally after everything we've seen.
+3. **Has a deterministic total order** — when `wall_ms` and `logical`
+   tie, `site_id` breaks the tie. Two replicas given the same op set
+   pick the same winner per cell.
+
+Algorithm follows Kulkarni et al., *Logical Physical Clocks*, 2014.
+
+### 21.3 Wire protocol
+
+All endpoints are JSON over HTTP. The server is started with `--collab`:
+
+```bash
+gridlang serve report.grid --collab --edit
+```
+
+| Endpoint                         | Method | Body                                           | Returns |
+|----------------------------------|--------|------------------------------------------------|---------|
+| `/api/collab/join`               | POST   | `{}` or `{peer_id?}`                            | `{peer_id, site_id, ops, version}` |
+| `/api/collab/leave`              | POST   | `{peer_id}`                                     | `{left: true}` |
+| `/api/collab/op`                 | POST   | `{peer_id, cell, value, sheet?}`                | `{op, version}` |
+| `/api/collab/poll`               | POST   | `{peer_id, since: vv}`                          | `{ops, version, peer_count}` |
+| `/api/collab/snapshot`           | GET    | —                                              | `{site_id, ops, version}` |
+| `/api/collab/stats`              | GET    | —                                              | `{cells, journal, peers, version}` |
+| `/api/collab/client.js`          | GET    | —                                              | JS source |
+
+The version vector `vv` is `{site_id: [wall_ms, logical], ...}`, so each
+peer summarizes "what I've seen from each replica" in O(sites) space.
+
+### 21.4 Op submission
+
+```
+POST /api/collab/op
+{
+  "peer_id": "peer-abcd1234",
+  "cell":    "B2",
+  "value":   120,
+  "sheet":   null
+}
+```
+
+The server:
+
+1. Validates the cell ref via `gridlang.bindings.parse_a1_ref` — header rows
+   (`row == 1`) are rejected.
+2. Generates a new `CellOp` with the server's HLC bumped via `tick(wall_ms)`.
+3. Calls `gridlang.bindings.apply_edit(grid_source, cell, value, sheet)` to
+   update the on-disk `.grid` file. The file remains the source of truth —
+   `gridlang run`/`render` after a collab session see the merged values.
+4. Records the op in the session's journal and replies with the op +
+   the new version vector.
+
+If the disk write fails (e.g. sheet not found), the in-memory op is rolled
+back so the session stays consistent with disk.
+
+### 21.5 Polling
+
+```
+POST /api/collab/poll
+{
+  "peer_id": "peer-abcd1234",
+  "since":   {"srv-xyz": [1700000001000, 7], "peer-foo": [1700000000999, 0]}
+}
+```
+
+The server returns ops whose `(wall_ms, logical)` is greater than the
+peer's recorded mark for that op's `site_id`. The peer merges the response
+into its local state, advances its HLC, and includes the new vector in
+the next poll.
+
+The default cadence is **700 ms**, controlled by `state.pollMs` in the
+client. Long-poll/SSE may be added in a future minor release; the JSON-poll
+shape will remain backward-compatible.
+
+### 21.6 Browser client
+
+`/api/collab/client.js` is a single-file IIFE. It:
+
+* Joins on page load, applies the snapshot to all `[data-grid-cell]`
+  elements found in the DOM.
+* Replaces the v0.5 `client_js()` blur handlers — edits route through
+  `/api/collab/op` instead of `/api/cell-edit`.
+* Polls in the background, applies remote ops to the DOM (skipping cells
+  the user is currently typing into), flashes a brief blue tint on remote
+  edits.
+* Sends `/api/collab/leave` via `fetch(..., {keepalive: true})` on
+  `beforeunload` so the server can drop the peer cleanly.
+
+The whole client is ~250 lines of vanilla JS, no dependencies.
+
+### 21.7 Programmatic API
+
+```python
+from gridlang.collab import CollabSession
+
+sess = CollabSession("/path/to/file.grid")
+peer_a = sess.register_peer()
+peer_b = sess.register_peer()
+
+# A submits an edit; the .grid file is rewritten on disk.
+op = sess.submit_local("B2", 999, peer_id=peer_a)
+
+# B asks for what's new.
+result = sess.poll(peer_id=peer_b, since={})
+# result == {"ops": [op], "version": {...}, "peer_count": 2}
+```
+
+The lower-level `gridlang.crdt` API can also be used standalone — e.g. in
+a Python notebook driving multiple `Document` replicas to verify
+convergence properties.
+
+### 21.8 Convergence proof sketch
+
+The CRDT is a **per-key LWW register** with HLC timestamps and `site_id`
+tiebreakers. This satisfies the standard CRDT axioms:
+
+* **Commutativity** — `apply(a) ∘ apply(b) == apply(b) ∘ apply(a)` because
+  the result depends only on `max((a.hlc, a.site_id), (b.hlc, b.site_id))`.
+* **Associativity** — same total-order argument extends to any sequence.
+* **Idempotence** — `apply(a) ∘ apply(a) == apply(a)` because the LWW
+  comparison `cur >= candidate` rejects duplicates.
+
+Property tests in `tests/test_crdt.py` exercise these on random op sets
+(see `TestDocumentConvergence.test_random_permutations_converge`).
+
+### 21.9 Backward compatibility
+
+* When `--collab` is **off** (default), all `/api/collab/*` endpoints
+  return 404 and the client JS is not served. Existing single-user
+  workflows (`gridlang serve --edit`) are unchanged.
+* When `--collab` is **on**, the v0.5 contenteditable cells and
+  `bind:` widgets keep working — they just commit through the CRDT
+  layer instead of the direct `/api/cell-edit` endpoint. The server
+  still updates the on-disk `.grid` file on every commit, so other
+  tools (CLI, editor preview, exports) see the latest values.
+* Out of scope for v0.8 (planned for v0.9+):
+  * Inserting/deleting rows or columns concurrently — would need an
+    RGA or Yjs-style sequence CRDT layered under cell ops.
+  * Federation between independent servers — the on-disk file plus the
+    in-memory journal is the source of truth for one server only.
+  * Auth — the protocol assumes peers on the same trusted network.

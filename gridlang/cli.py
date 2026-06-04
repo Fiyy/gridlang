@@ -31,7 +31,7 @@ def main():
         prog='gridlang',
         description='GridLang — AI-native spreadsheet format toolkit',
     )
-    parser.add_argument('--version', action='version', version='gridlang 0.7.0')
+    parser.add_argument('--version', action='version', version='gridlang 0.8.0')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
@@ -103,6 +103,10 @@ def main():
                                help='Open editor UI with live preview (default: preview only)')
     serve_parser.add_argument('--allow-remote', action='store_true',
                                help='Allow http(s) @source URLs while serving')
+    serve_parser.add_argument('--collab', action='store_true',
+                               help='Enable CRDT-based collaborative editing (v0.8). '
+                                    'Multiple browser tabs connecting to the same URL '
+                                    'can edit cells live; changes converge via LWW.')
 
     # js-bundle command (v0.7) — emit a self-contained JS bundle from a .grid file.
     bundle_parser = subparsers.add_parser(
@@ -515,7 +519,8 @@ def cmd_serve(args):
     """Start live preview server or editor."""
     from gridlang.server import serve
     serve(args.file, port=args.port, edit=args.edit,
-          allow_remote=getattr(args, 'allow_remote', False))
+          allow_remote=getattr(args, 'allow_remote', False),
+          collab=getattr(args, 'collab', False))
 
 
 def cmd_js_bundle(args):

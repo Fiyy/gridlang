@@ -4,7 +4,7 @@ GridLang - AI-Native Spreadsheet Format
 Data + Compute + Presentation in a single .grid file.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 from gridlang.parser import parse, GridDocument
 from gridlang.runtime import execute
@@ -28,6 +28,14 @@ from gridlang.js_runtime import (
     get_helpers_source, get_bridge_source,
 )
 from gridlang.js_bundle import bundle_doc, bundle_file, BundleResult, get_pipeline_source
+from gridlang.crdt import (
+    HLC, CellKey, CellOp, Document as CrdtDocument,
+    vv_from_ops, vv_max, vv_serialize, vv_deserialize,
+)
+from gridlang.collab import (
+    CollabSession, CollabError, get_session as get_collab_session,
+    reset_sessions as reset_collab_sessions,
+)
 
 __all__ = [
     "parse", "execute", "render", "GridDocument",
@@ -41,5 +49,9 @@ __all__ = [
     "execute_js", "is_node_available", "JsRuntimeUnavailable",
     "get_helpers_source", "get_bridge_source", "get_pipeline_source",
     "bundle_doc", "bundle_file", "BundleResult",
+    "HLC", "CellKey", "CellOp", "CrdtDocument",
+    "vv_from_ops", "vv_max", "vv_serialize", "vv_deserialize",
+    "CollabSession", "CollabError",
+    "get_collab_session", "reset_collab_sessions",
     "__version__",
 ]

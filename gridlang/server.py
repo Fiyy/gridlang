@@ -29,6 +29,10 @@ from gridlang.runtime import execute
 from gridlang.renderer import render
 from gridlang.data_sources import load_dataframes
 from gridlang.bindings import apply_edit, BindingError, client_js
+from gridlang.collab import (
+    CollabSession, CollabError, get_session,
+    parse_poll_request, parse_op_request,
+)
 import pandas as pd
 
 
@@ -38,6 +42,8 @@ class GridLangHandler(SimpleHTTPRequestHandler):
     grid_path: Path = None
     edit_mode: bool = False
     allow_remote: bool = False
+    collab_mode: bool = False
+    collab_session: 'CollabSession' = None
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -55,6 +61,12 @@ class GridLangHandler(SimpleHTTPRequestHandler):
             self._api_source()
         elif path == '/api/poll':
             self._api_poll()
+        elif path == '/api/collab/snapshot':
+            self._api_collab_snapshot()
+        elif path == '/api/collab/stats':
+            self._api_collab_stats()
+        elif path == '/api/collab/client.js':
+            self._api_collab_client_js()
         else:
             self.send_error(404)
 
@@ -73,6 +85,14 @@ class GridLangHandler(SimpleHTTPRequestHandler):
             self._api_export_csv()
         elif path == '/api/cell-edit':
             self._api_cell_edit()
+        elif path == '/api/collab/join':
+            self._api_collab_join()
+        elif path == '/api/collab/leave':
+            self._api_collab_leave()
+        elif path == '/api/collab/op':
+            self._api_collab_op()
+        elif path == '/api/collab/poll':
+            self._api_collab_poll()
         else:
             self.send_error(404)
 
@@ -93,6 +113,10 @@ class GridLangHandler(SimpleHTTPRequestHandler):
             extra = _RELOAD_SCRIPT
             if self.edit_mode and ('data-grid-cell' in html or 'data-grid-bind' in html):
                 extra = extra + client_js()
+            if self.collab_mode and ('data-grid-cell' in html or 'data-grid-bind' in html):
+                # Collab client uses the same DOM markers as bindings but routes
+                # commits through /api/collab/op + a polling loop.
+                extra = extra + '<script src="/api/collab/client.js" defer></script>'
             if '</body>' in html:
                 html = html.replace('</body>', extra + '</body>')
             else:
@@ -366,6 +390,129 @@ class GridLangHandler(SimpleHTTPRequestHandler):
             html = ''
         return new_content, html
 
+
+    # =========================================================================
+    # Collaboration API (v0.8 — CRDT-based real-time editing)
+    # =========================================================================
+
+    def _require_collab(self) -> Optional['CollabSession']:
+        """Return the active CollabSession or send 404 if collab is off."""
+        if not self.collab_mode or self.collab_session is None:
+            self._send_json(404, {'error': 'collab is not enabled (start server with --collab)'})
+            return None
+        return self.collab_session
+
+    def _api_collab_join(self):
+        """POST /api/collab/join — register a new peer.
+
+        Request:  ``{}`` or ``{"peer_id": "optional-name"}``
+        Response: ``{peer_id, site_id, snapshot, version}``
+        """
+        sess = self._require_collab()
+        if sess is None:
+            return
+        try:
+            body = json.loads(self._read_body() or '{}')
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        peer_id = sess.register_peer(body.get('peer_id'))
+        snap = sess.snapshot(peer_id=peer_id)
+        self._send_json(200, {
+            'peer_id': peer_id,
+            'site_id': snap['site_id'],
+            'ops': snap['ops'],
+            'version': snap['version'],
+        })
+
+    def _api_collab_leave(self):
+        """POST /api/collab/leave — drop a peer registration."""
+        sess = self._require_collab()
+        if sess is None:
+            return
+        try:
+            body = json.loads(self._read_body() or '{}')
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        peer_id = body.get('peer_id')
+        if peer_id:
+            sess.drop_peer(peer_id)
+        self._send_json(200, {'left': True})
+
+    def _api_collab_op(self):
+        """POST /api/collab/op — submit a single edit.
+
+        Request:  ``{peer_id, cell, value, sheet?}``
+        Response: ``{op, version}``  (the op is what other peers will see)
+        """
+        sess = self._require_collab()
+        if sess is None:
+            return
+        try:
+            body = json.loads(self._read_body() or '{}')
+        except (json.JSONDecodeError, ValueError) as e:
+            self._send_json(400, {'error': f'Invalid JSON: {e}'})
+            return
+        try:
+            peer_id, cell, value, sheet = parse_op_request(body)
+            op = sess.submit_local(cell, value, peer_id=peer_id, sheet=sheet)
+        except CollabError as e:
+            self._send_json(400, {'error': str(e)})
+            return
+        except BindingError as e:
+            self._send_json(400, {'error': str(e)})
+            return
+        self._send_json(200, {
+            'op': op.to_dict(),
+            'version': sess.stats()['version'],
+        })
+
+    def _api_collab_poll(self):
+        """POST /api/collab/poll — fetch ops the peer hasn't seen yet.
+
+        Request:  ``{peer_id, since: {site_id: [wall, logical], ...}}``
+        Response: ``{ops, version, peer_count}``
+        """
+        sess = self._require_collab()
+        if sess is None:
+            return
+        try:
+            body = json.loads(self._read_body() or '{}')
+        except (json.JSONDecodeError, ValueError) as e:
+            self._send_json(400, {'error': f'Invalid JSON: {e}'})
+            return
+        try:
+            peer_id, since = parse_poll_request(body)
+            result = sess.poll(peer_id=peer_id, since=since)
+        except CollabError as e:
+            self._send_json(400, {'error': str(e)})
+            return
+        self._send_json(200, result)
+
+    def _api_collab_snapshot(self):
+        """GET /api/collab/snapshot — full state for a fresh peer."""
+        sess = self._require_collab()
+        if sess is None:
+            return
+        self._send_json(200, sess.snapshot())
+
+    def _api_collab_stats(self):
+        """GET /api/collab/stats — quick status for monitoring."""
+        sess = self._require_collab()
+        if sess is None:
+            return
+        self._send_json(200, sess.stats())
+
+    def _api_collab_client_js(self):
+        """GET /api/collab/client.js — return the client-side collab JS module."""
+        if not self.collab_mode:
+            self.send_error(404)
+            return
+        from gridlang.collab_client import COLLAB_CLIENT_JS
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/javascript; charset=utf-8')
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+        self.wfile.write(COLLAB_CLIENT_JS.encode('utf-8'))
 
     @staticmethod
     def _replace_data_section(content: str, new_csv: str, sheet: str = None) -> str:
@@ -1031,7 +1178,7 @@ async function onCellBlur(td) {
 # =============================================================================
 
 def serve(grid_path: str | Path, port: int = 8080, edit: bool = False,
-          allow_remote: bool = False):
+          allow_remote: bool = False, collab: bool = False):
     """
     Start a local HTTP server.
 
@@ -1040,6 +1187,9 @@ def serve(grid_path: str | Path, port: int = 8080, edit: bool = False,
         port: HTTP port number.
         edit: If True, serve the editor UI. If False, preview only.
         allow_remote: If True, http(s) @source URLs in data sections are fetched.
+        collab: If True, enable CRDT-based collaborative editing endpoints
+                under /api/collab/*. Multiple peers can connect to the same
+                URL and edit cells live; ops converge via the LWW CRDT.
     """
     path = Path(grid_path).resolve()
     if not path.exists():
@@ -1048,10 +1198,24 @@ def serve(grid_path: str | Path, port: int = 8080, edit: bool = False,
     GridLangHandler.grid_path = path
     GridLangHandler.edit_mode = edit
     GridLangHandler.allow_remote = allow_remote
+    GridLangHandler.collab_mode = collab
+    if collab:
+        # Reset on startup so a previous run's session doesn't bleed in.
+        from gridlang.collab import reset_sessions
+        reset_sessions()
+        GridLangHandler.collab_session = get_session(path)
 
     server = HTTPServer(('127.0.0.1', port), GridLangHandler)
 
-    mode = "Editor" if edit else "Preview"
+    mode_parts = []
+    if edit:
+        mode_parts.append("Editor")
+    else:
+        mode_parts.append("Preview")
+    if collab:
+        mode_parts.append("Collab")
+    mode = " + ".join(mode_parts)
+
     print(f"\n  {'─' * 44}")
     print(f"  GridLang {mode}")
     print(f"  {'─' * 44}")
@@ -1061,6 +1225,9 @@ def serve(grid_path: str | Path, port: int = 8080, edit: bool = False,
         print(f"  Preview:   http://localhost:{port}/preview")
     if allow_remote:
         print(f"  Remote sources: ENABLED (--allow-remote)")
+    if collab:
+        sess = GridLangHandler.collab_session
+        print(f"  Collab:    site={sess.site_id}  endpoints=/api/collab/*")
     print(f"  {'─' * 44}")
     print(f"  Auto-reload: enabled")
     print(f"  Press Ctrl+C to stop\n")

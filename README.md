@@ -99,7 +99,13 @@ Launch a live-preview web server with auto-reload on file changes.
 
 ```bash
 gridlang serve dashboard.grid --port 8080
+gridlang serve dashboard.grid --port 8080 --edit            # editor UI
+gridlang serve dashboard.grid --port 8080 --edit --collab   # multi-peer (v0.8)
 ```
+
+With `--collab`, multiple browser tabs can connect to the same URL and edit
+cells live; changes converge via a CRDT (LWW per cell with HLC clocks).
+See [Collaborative Editing](#collaborative-editing-v08).
 
 ### `gridlang js-bundle`
 
@@ -126,9 +132,10 @@ node report.bundle.js                                # prints JSON
 | Conditional formatting | Dialog-heavy | Inline rules |
 | Remote data | Manual import / Power Query | `@source: <url>` directive |
 | Reactive editing | VBA macros / OLE | `{{ cell("B2") }}` + `bind:` form widgets |
+| Live collaboration | OLE + Office365 servers | `serve --collab` over CRDT, no cloud needed |
 | Compute language | VBA + 400 functions | Python or JavaScript (`engine:` selector) |
 | Bundle for browser | Closed-source COM/OLE | `gridlang js-bundle --browser` produces a Web Worker |
-| Testability | Nearly impossible | Standard unit tests (378 tests) |
+| Testability | Nearly impossible | Standard unit tests (442 tests) |
 | Interop | Locked ecosystem | Import/export Excel & CSV |
 
 ## Feature Highlights
@@ -374,6 +381,36 @@ gridlang serve report.grid --port 8080
 # Open http://localhost:8080 — updates live as you edit
 ```
 
+### Collaborative Editing (v0.8)
+
+Multiple browser tabs (or separate users on the same network) can edit the
+same `.grid` file at once. Changes converge via a CRDT — every replica that
+has seen the same set of operations ends up with the same per-cell value,
+regardless of arrival order.
+
+```bash
+gridlang serve dashboard.grid --collab --edit
+# Open http://localhost:8080 in two browser tabs.
+# Edit a cell in tab A → within ~700ms the value appears (and flashes blue) in tab B.
+# Edit the same cell in both tabs at once → the higher-HLC write wins on every replica.
+```
+
+The implementation is three small modules:
+
+| Module                       | Role                                            |
+|------------------------------|-------------------------------------------------|
+| `gridlang.crdt`              | HLC + LWW per-cell + version vectors            |
+| `gridlang.collab`            | `CollabSession` — peers, persistence, sync      |
+| `gridlang.collab_client`     | Self-contained browser JS (~250 lines)          |
+
+Wire protocol is JSON-over-HTTP — `POST /api/collab/{join,op,poll,leave}`,
+`GET /api/collab/{snapshot,stats}`. The server's on-disk `.grid` file
+remains the source of truth; every commit is persisted, so `gridlang run`
+or `render` after a collab session sees the merged values.
+
+See [`spec/SPEC.md` §21](spec/SPEC.md) for the full protocol, convergence
+proof sketch, and programmatic Python API.
+
 ## Project Structure
 
 ```
@@ -385,6 +422,9 @@ gridlang/
 │   ├── js_runtime.py      # alternative JavaScript compute engine (v0.6)
 │   ├── js_bundle.py       # Node + Web Worker bundle generator (v0.7)
 │   ├── js/                # JS source files (df_helpers, pipeline, bridge)
+│   ├── crdt.py            # HLC + LWW per-cell CRDT (v0.8)
+│   ├── collab.py          # CollabSession — peers, persistence, sync (v0.8)
+│   ├── collab_client.py   # browser-side collab JS (v0.8)
 │   ├── renderer.py        # HTML/SVG rendering
 │   ├── chart_dsl.py       # chart:/format: DSL preprocessor
 │   ├── data_sources.py    # @source remote data loader + cache
@@ -397,8 +437,8 @@ gridlang/
 │   ├── server.py          # live preview server
 │   └── cli.py             # CLI entry point
 ├── spec/SPEC.md           # format specification
-├── examples/              # 11 example .grid files + sample.xlsx
-└── tests/                 # 378 tests
+├── examples/              # 12 example .grid files + sample.xlsx
+└── tests/                 # 442 tests
 ```
 
 ## License
