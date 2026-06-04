@@ -194,6 +194,11 @@ class _ServerFixture:
         from gridlang.collab import reset_sessions, get_session
         reset_sessions()
 
+        # Explicitly reset all class-level state so prior tests can't leak
+        # `collab_mode=True` into a test that wants the server to be
+        # collab-disabled. macOS CI exposed this as a flaky failure where the
+        # previous fixture's daemon thread held the class attrs longer than
+        # `close()` was willing to wait.
         GridLangHandler.grid_path = grid_path
         GridLangHandler.edit_mode = False
         GridLangHandler.allow_remote = False
@@ -231,17 +236,30 @@ class _ServerFixture:
     def close(self):
         self.httpd.shutdown()
         self.httpd.server_close()
-        self._thread.join(timeout=1)
+        # macOS CI hit a flaky case where shutdown took >1s with a request
+        # in flight, leaking class-level state into the next test. Give it
+        # more time, and explicitly null out class attrs so a slow daemon
+        # thread can't re-flip `collab_mode` after the next test starts.
+        self._thread.join(timeout=5)
+        GridLangHandler.collab_session = None
+        GridLangHandler.collab_mode = False
 
 
 class TestCollabHTTP:
 
     def setup_method(self):
         self._fixtures = []
+        # Force-reset class-level state on every test so a flaky teardown
+        # in a prior test (slow daemon thread, etc.) can't leave
+        # `collab_mode=True` set when this test wants it off.
+        GridLangHandler.collab_mode = False
+        GridLangHandler.collab_session = None
 
     def teardown_method(self):
         for f in self._fixtures:
             f.close()
+        GridLangHandler.collab_mode = False
+        GridLangHandler.collab_session = None
 
     def _server(self, tmp_path, **kw):
         path = tmp_path / 'sample.grid'
