@@ -1,0 +1,114 @@
+name: Deploy demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'gridlang/**'
+      - 'examples/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+# Pages requires these permissions for the deploy job.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One concurrent deploy at a time, cancel stale ones in flight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build site
+        run: |
+          set -e
+          mkdir -p _site
+
+          # 1. Copy the static SPA shell.
+          cp -r docs/. _site/
+
+          # 2. Copy the gridlang Python package into _site/gridlang/.
+          mkdir -p _site/gridlang
+          cp -r gridlang/. _site/gridlang/
+          # Strip __pycache__ etc.
+          find _site/gridlang -type d -name '__pycache__' -exec rm -rf {} + || true
+          find _site/gridlang -type f -name '*.pyc' -delete || true
+
+          # 3. Copy examples (only .grid; no fixtures since browser can't fetch them anyway).
+          mkdir -p _site/examples
+          cp examples/*.grid _site/examples/
+
+          # 4. Generate manifest.json listing every .py file the SPA needs to load.
+          python3 <<'PY'
+          import json, pathlib
+
+          root = pathlib.Path('_site/gridlang')
+          # Order matters? Pyodide imports lazily, so any order works — but
+          # keep it stable for cache friendliness.
+          py_files = sorted(
+              str(p.relative_to(root))
+              for p in root.rglob('*.py')
+          )
+          js_files = sorted(
+              str(p.relative_to(root))
+              for p in root.rglob('*.js')
+          )
+          all_files = py_files + js_files
+
+          examples = sorted(
+              str(p.relative_to(pathlib.Path('_site')))
+              for p in pathlib.Path('_site/examples').glob('*.grid')
+          )
+          example_entries = []
+          for path in examples:
+              name = pathlib.Path(path).stem
+              # Pretty-format: "01_hello" → "01 hello"
+              pretty = name.replace('_', ' ', 1) if '_' in name else name
+              example_entries.append({'name': pretty, 'path': path})
+
+          manifest = {
+              'gridlang_files': all_files,
+              'examples': example_entries,
+          }
+          pathlib.Path('_site/manifest.json').write_text(
+              json.dumps(manifest, indent=2), encoding='utf-8'
+          )
+          print(f'manifest: {len(all_files)} gridlang files, {len(example_entries)} examples')
+          PY
+
+          # 5. Drop a tiny .nojekyll so dotfiles aren't filtered.
+          touch _site/.nojekyll
+
+          # 6. List everything for the deploy log.
+          echo "─── _site contents ───"
+          find _site -type f | sort
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

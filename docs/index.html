@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GridLang — Online Demo</title>
+<meta name="description" content="GridLang online playground — AI-native spreadsheet format running entirely in your browser via Pyodide. Import Excel/CSV, edit cells, export back, all client-side.">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0f172a; --bg2: #1e293b; --bg3: #283548; --border: #334155;
+    --text: #e2e8f0; --dim: #94a3b8; --accent: #3b82f6;
+    --green: #10b981; --red: #ef4444; --yellow: #f59e0b;
+    --bar-h: 46px; --tab-h: 32px;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh; overflow: hidden;
+  }
+
+  /* ── Toolbar ── */
+  .bar {
+    height: var(--bar-h); background: var(--bg2); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 16px; gap: 10px; flex-wrap: nowrap;
+  }
+  .bar .logo {
+    font-weight: 700; font-size: 16px; color: var(--accent);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .bar .logo small { font-size: 10px; color: var(--dim); font-weight: 500; }
+  .bar select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    padding: 5px 10px; border-radius: 5px; font-size: 12px; cursor: pointer;
+    max-width: 220px;
+  }
+  .bar select:hover { border-color: var(--accent); }
+  .bar .sep { flex: 1; }
+  .bar .st {
+    font-size: 11px; padding: 3px 10px; border-radius: 4px; font-weight: 500;
+    white-space: nowrap;
+  }
+  .bar .st.ok { background: #064e3b; color: #6ee7b7; }
+  .bar .st.err { background: #7f1d1d; color: #fca5a5; }
+  .bar .st.busy { background: #1e3a5f; color: #93c5fd; }
+  .bar button {
+    padding: 5px 12px; border-radius: 5px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 12px; cursor: pointer;
+    white-space: nowrap;
+  }
+  .bar button:hover { background: var(--bg3); border-color: var(--accent); }
+  .bar button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .bar button.pri { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .bar button.pri:hover { background: #2563eb; }
+  .bar a {
+    color: var(--dim); font-size: 11px; text-decoration: none; padding: 4px 8px;
+    border-radius: 4px;
+  }
+  .bar a:hover { color: var(--text); background: var(--bg3); }
+
+  /* ── Loading overlay ── */
+  .loading {
+    position: fixed; inset: 0; background: rgba(15, 23, 42, 0.95); z-index: 1000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: var(--text); gap: 16px;
+  }
+  .loading.hidden { display: none; }
+  .loading h1 { font-size: 24px; color: var(--accent); margin-bottom: 4px; }
+  .loading .sub { color: var(--dim); font-size: 13px; }
+  .loading progress {
+    width: 320px; height: 6px; -webkit-appearance: none; appearance: none;
+    border: none; background: var(--bg2); border-radius: 3px; overflow: hidden;
+  }
+  .loading progress::-webkit-progress-bar { background: var(--bg2); }
+  .loading progress::-webkit-progress-value { background: var(--accent); transition: width 0.3s; }
+  .loading progress::-moz-progress-bar { background: var(--accent); }
+  .loading .step {
+    color: var(--dim); font: 12px 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    height: 18px;
+  }
+  .loading .err {
+    color: var(--red); font: 12px monospace; max-width: 600px; white-space: pre-wrap;
+    background: #1c1917; padding: 12px; border-radius: 6px; border: 1px solid var(--red);
+    display: none;
+  }
+
+  /* ── Layout ── */
+  .main { display: flex; height: calc(100vh - var(--bar-h)); }
+
+  /* ── Editor ── */
+  .ed-pane {
+    width: 50%; min-width: 280px; display: flex; flex-direction: column;
+    border-right: 2px solid var(--border); position: relative;
+  }
+  .ed-tabs {
+    height: var(--tab-h); background: var(--bg); display: flex; align-items: center;
+    padding: 0 10px; border-bottom: 1px solid var(--border); gap: 4px;
+  }
+  .ed-tab {
+    padding: 4px 12px; font-size: 11px; background: var(--bg2); color: var(--text);
+    border-radius: 3px 3px 0 0; border: 1px solid var(--border); border-bottom: none;
+    font-weight: 500;
+  }
+  .ed-meta { color: var(--dim); font-size: 11px; margin-left: auto; }
+
+  .ed-wrap { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+  .ed-lines {
+    width: 46px; background: var(--bg); color: #475569;
+    font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    text-align: right; padding: 10px 8px 10px 0; overflow: hidden; user-select: none;
+    border-right: 1px solid var(--border); flex-shrink: 0;
+  }
+  .ed-input {
+    flex: 1; background: var(--bg); color: #cbd5e1; border: none; outline: none;
+    resize: none; font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    padding: 10px 14px; tab-size: 4; white-space: pre; overflow: auto;
+    caret-color: var(--accent);
+  }
+  .ed-input::selection { background: rgba(59, 130, 246, 0.35); }
+
+  .err-box {
+    display: none; background: #1c1917; color: #fca5a5; padding: 10px 14px;
+    font: 12px/18px monospace; max-height: 120px; overflow-y: auto;
+    border-top: 2px solid var(--red);
+  }
+  .err-box.vis { display: block; }
+
+  /* ── Resize Handle ── */
+  .resizer {
+    width: 5px; cursor: col-resize; background: transparent; z-index: 10; flex-shrink: 0;
+  }
+  .resizer:hover, .resizer.on { background: var(--accent); }
+
+  /* ── Preview ── */
+  .pv-pane { flex: 1; display: flex; flex-direction: column; background: #fff; }
+  .pv-bar {
+    height: var(--tab-h); background: #f8fafc; border-bottom: 1px solid #e2e8f0;
+    display: flex; align-items: center; padding: 0 12px; gap: 8px;
+  }
+  .pv-bar span.lbl { font-size: 11px; color: #64748b; }
+  .pv-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .pv-dot.g { background: var(--green); }
+  .pv-dot.r { background: var(--red); }
+  .pv-dot.y { background: var(--yellow); }
+  .pv-tabs { display: flex; gap: 0; margin-left: auto; }
+  .pv-tab {
+    padding: 4px 14px; font-size: 11px; cursor: pointer; color: #64748b;
+    border-bottom: 2px solid transparent; user-select: none;
+  }
+  .pv-tab.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
+  .pv-tab:hover { color: #1e40af; }
+  #pv-frame { flex: 1; border: none; width: 100%; background: #fff; }
+  #pv-data { flex: 1; overflow: auto; display: none; padding: 0; }
+  #pv-data table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #pv-data th {
+    background: #1e40af; color: #fff; padding: 7px 10px; font-weight: 600;
+    text-align: left; font-size: 11px; position: sticky; top: 0; z-index: 1;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  #pv-data td {
+    padding: 4px 8px; border: 1px solid #e2e8f0; cursor: cell; min-width: 70px;
+    font-size: 12px;
+  }
+  #pv-data td:focus {
+    outline: 2px solid var(--accent); outline-offset: -2px; background: #eff6ff;
+  }
+  #pv-data tr:hover td { background: #f8fafc; }
+  #pv-data td.edited { background: #fefce8; }
+  #pv-data td.row-num {
+    text-align: center; color: #94a3b8; background: #f9fafb; font-size: 11px;
+    cursor: default; min-width: 40px;
+  }
+
+  /* ── Hint ── */
+  .hint {
+    position: fixed; bottom: 8px; right: 12px; font-size: 10px; color: #475569;
+    z-index: 50;
+  }
+  .hint kbd {
+    background: var(--bg2); padding: 1px 6px; border-radius: 3px;
+    border: 1px solid var(--border); font-family: monospace;
+  }
+
+  /* ── Hidden input + dropdown ── */
+  #file-input { display: none; }
+  .dropdown {
+    display: none; position: fixed; background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 0; z-index: 999;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+  .dropdown.vis { display: block; }
+  .dropdown-item {
+    padding: 8px 18px; font-size: 12px; cursor: pointer; color: var(--text);
+    white-space: nowrap;
+  }
+  .dropdown-item:hover { background: var(--bg3); }
+</style>
+</head>
+<body>
+
+<!-- Loading overlay -->
+<div class="loading" id="loading">
+  <h1>📊 GridLang</h1>
+  <div class="sub">AI-native spreadsheet format — running fully in your browser</div>
+  <progress id="loading-progress" value="0" max="100"></progress>
+  <div class="step" id="loading-step">Initializing…</div>
+  <div class="err" id="loading-err"></div>
+</div>
+
+<!-- Toolbar -->
+<div class="bar">
+  <span class="logo">📊 GridLang <small id="version">v1.0</small></span>
+  <select id="example-select" title="Load an example .grid file">
+    <option value="">— Examples —</option>
+  </select>
+  <button onclick="doImport()">📥 Import</button>
+  <button onclick="showExportMenu(event)">📤 Export ▾</button>
+  <button onclick="doFormat()">🎨 Format</button>
+  <button onclick="downloadGrid()">💾 Download .grid</button>
+  <span class="sep"></span>
+  <span class="st ok" id="status">Ready</span>
+  <a href="https://github.com/Fiyy/gridlang" target="_blank" rel="noopener">GitHub ↗</a>
+  <a href="https://github.com/Fiyy/gridlang/blob/main/spec/SPEC.md" target="_blank" rel="noopener">Spec ↗</a>
+</div>
+
+<input type="file" id="file-input" accept=".xlsx,.xls,.csv,.grid" onchange="handleFile(event)">
+
+<!-- Export dropdown -->
+<div id="export-menu" class="dropdown">
+  <div class="dropdown-item" onclick="doExport('xlsx')">Export as Excel (.xlsx)</div>
+  <div class="dropdown-item" onclick="doExport('csv')">Export as CSV (.csv)</div>
+</div>
+
+<!-- Main -->
+<div class="main">
+  <!-- Editor -->
+  <div class="ed-pane" id="ed-pane">
+    <div class="ed-tabs">
+      <div class="ed-tab">📝 Source</div>
+      <span class="ed-meta" id="ed-meta">—</span>
+    </div>
+    <div class="ed-wrap">
+      <div class="ed-lines" id="lines">1</div>
+      <textarea class="ed-input" id="editor" spellcheck="false" autocomplete="off"
+        autocorrect="off" autocapitalize="off"></textarea>
+    </div>
+    <div class="err-box" id="errbox"></div>
+  </div>
+
+  <div class="resizer" id="resizer"></div>
+
+  <!-- Preview -->
+  <div class="pv-pane">
+    <div class="pv-bar">
+      <div class="pv-dot g" id="dot"></div>
+      <span class="lbl" id="pv-st">Preview</span>
+      <div class="pv-tabs">
+        <div class="pv-tab active" data-tab="render" onclick="switchPvTab('render')">🖼️ Render</div>
+        <div class="pv-tab" data-tab="data" onclick="switchPvTab('data')">📊 Data</div>
+      </div>
+    </div>
+    <iframe id="pv-frame" sandbox="allow-scripts"></iframe>
+    <div id="pv-data"></div>
+  </div>
+</div>
+
+<div class="hint">
+  100% client-side &nbsp;·&nbsp; Pyodide + GridLang &nbsp;·&nbsp;
+  <kbd>Ctrl</kbd>+<kbd>S</kbd> save
+</div>
+
+<!-- Pyodide -->
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -35,3 +35,6 @@ examples/*_exported.xlsx
 # Temporary
 *.tmp
 /tmp/
+
+# GitHub Pages build output (deploy workflow generates this)
+/_site/

@@ -1,11 +1,14 @@
 # GridLang
 
 [![tests](https://github.com/Fiyy/gridlang/actions/workflows/test.yml/badge.svg)](https://github.com/Fiyy/gridlang/actions/workflows/test.yml)
+[![pages](https://github.com/Fiyy/gridlang/actions/workflows/pages.yml/badge.svg)](https://github.com/Fiyy/gridlang/actions/workflows/pages.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![Latest release](https://img.shields.io/github/v/release/Fiyy/gridlang)](https://github.com/Fiyy/gridlang/releases)
 
 **The AI-native spreadsheet format — data, formulas, and visualization in a single plain-text file.**
+
+> 🚀 **[Try it live in your browser →](https://fiyy.github.io/gridlang/)** No install needed; the entire toolkit runs client-side via Pyodide.
 
 GridLang is to Excel what Markdown is to Word: a human-readable, version-controllable, AI-friendly format that captures the full power of spreadsheets — 59 formulas, 9 chart types, conditional formatting, JS/Python compute engines, real-time CRDT collaboration — without the binary blob.
 
@@ -15,6 +18,8 @@ GridLang is to Excel what Markdown is to Word: a human-readable, version-control
 cd /data/gridlang
 pip install -e .
 ```
+
+Or skip the install entirely — **[the live demo](https://fiyy.github.io/gridlang/)** runs the whole stack in your browser via Pyodide. Try the examples, edit cells, import an Excel file, export to `.xlsx` / `.csv` — all client-side.
 
 ## Quick Start
 
