@@ -114,6 +114,25 @@ class TestCSVExport:
 
 
 class TestExcelImport:
+    """Behavioural tests for `gridlang.excel_import.import_excel`.
+
+    These exercise the public API end-to-end: a real .xlsx is built with
+    openpyxl, fed through `import_excel`, and the resulting `.grid` is
+    parsed/executed/rendered to verify what the user actually sees.
+
+    Categories:
+      1. Smoke / contract — produces a valid 4-section .grid string.
+      2. Header detection — text headers vs all-numeric first row.
+      3. Cell-type fidelity — strings, ints, floats, dates, bools, NaN.
+      4. Formula extraction — plain formulas + ArrayFormula dynamic arrays.
+      5. Trailing summary rows — pulled out of data into compute.
+      6. Detached scattered rows — pulled out, don't pollute dtypes.
+      7. End-to-end render — the rendered HTML matches expectations.
+      8. Multi-sheet, sheet selection, and error paths.
+    """
+
+    # ── 1. Smoke / contract ──────────────────────────────────────────────
+
     def test_basic_import(self, sample_xlsx):
         result = import_excel(sample_xlsx)
         assert "--- meta ---" in result
@@ -124,20 +143,38 @@ class TestExcelImport:
     def test_result_is_valid_grid(self, sample_xlsx):
         result = import_excel(sample_xlsx)
         doc = parse_string(result)
+        # All four sections must be parseable.
+        assert doc.meta.get("name")
         assert "Alpha" in doc.data_raw
+        # Compute and present sections always emitted, even if empty-ish.
+        assert "def transform" in doc.compute_raw
+        assert "<table" in doc.present_raw
 
-    def test_specific_sheet(self, sample_xlsx):
-        result = import_excel(sample_xlsx, sheet_names=["Data"])
-        assert "Alpha" in result
+    def test_meta_fields_populated(self, sample_xlsx):
+        result = import_excel(sample_xlsx)
+        doc = parse_string(result)
+        assert doc.meta["name"] == "test"  # filename stem
+        assert doc.meta["engine"] == "python"
+        assert doc.meta["imported_from"] == "test.xlsx"
+        # import_date must be a string, not a datetime literal.
+        assert "import_date" in doc.meta
 
-    def test_file_not_found(self):
-        with pytest.raises(FileNotFoundError):
-            import_excel("/nonexistent/file.xlsx")
+    def test_filename_with_unicode(self, tmp_path):
+        """Chinese / accented filenames preserved in meta."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Name", "Value"])
+        ws.append(["x", 1])
+        f = tmp_path / "测试_报告.xlsx"
+        wb.save(f); wb.close()
 
-    # ──────────────────────────────────────────────────────────────────
-    # Regressions for the "测试1.xlsx"-class of import bugs:
-    # numeric-only first row, gap rows, and trailing summary rows.
-    # ──────────────────────────────────────────────────────────────────
+        result = import_excel(f)
+        doc = parse_string(result)
+        assert doc.meta["name"] == "测试_报告"
+        assert "测试_报告.xlsx" in doc.meta["imported_from"]
+
+    # ── 2. Header detection ──────────────────────────────────────────────
 
     def test_no_header_row_detected_when_all_numeric(self, tmp_path):
         """Row 1 = all numbers → don't promote it to header.
@@ -148,27 +185,23 @@ class TestExcelImport:
         from openpyxl import Workbook
         wb = Workbook()
         ws = wb.active
-        ws.title = "Sheet1"
         for v in range(1, 6):  # 5 rows of all-numeric data
             ws.append([v] * 4)
         f = tmp_path / "no_header.xlsx"
         wb.save(f); wb.close()
 
         result = import_excel(f)
-        from gridlang.parser import parse_string
         from gridlang.schema import parse_data
         df = parse_data(parse_string(result).data_raw)
 
         # All 5 source rows must survive — none consumed as header.
         assert len(df) == 5
-        # Synthetic headers must be col_A..col_D, not "1, 1.1, ...".
         assert list(df.columns) == ["col_A", "col_B", "col_C", "col_D"]
-        # First row's values are 1, last row's values are 5.
         assert int(df.iloc[0, 0]) == 1
         assert int(df.iloc[-1, 0]) == 5
 
     def test_header_row_detected_when_text(self, tmp_path):
-        """Row 1 = text labels → DO use it as header (existing behaviour)."""
+        """Row 1 = text labels → DO use it as header."""
         from openpyxl import Workbook
         wb = Workbook()
         ws = wb.active
@@ -179,13 +212,242 @@ class TestExcelImport:
         wb.save(f); wb.close()
 
         result = import_excel(f)
-        from gridlang.parser import parse_string
         from gridlang.schema import parse_data
         df = parse_data(parse_string(result).data_raw)
 
         assert list(df.columns) == ["Region", "Q1", "Q2"]
         assert len(df) == 2
         assert df.iloc[0]["Region"] == "North"
+
+    def test_mixed_first_row_is_data_not_header(self, tmp_path):
+        """Row 1 with a number among labels is data, not a header."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Item", 100, 200])  # mixed → not a header
+        ws.append(["A", 1, 2])
+        ws.append(["B", 3, 4])
+        f = tmp_path / "mixed_first_row.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        df = parse_data(parse_string(result).data_raw)
+        # Synthetic headers since the first row isn't pure-text.
+        assert list(df.columns) == ["col_A", "col_B", "col_C"]
+        assert len(df) == 3
+
+    def test_numeric_string_first_row_is_data_not_header(self, tmp_path):
+        """A first row of numeric *strings* like '2024','2025' is still data."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["2024", "2025", "2026"])  # all numeric strings → data
+        ws.append([100, 110, 120])
+        f = tmp_path / "numeric_strings.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        df = parse_data(parse_string(result).data_raw)
+        assert list(df.columns) == ["col_A", "col_B", "col_C"]
+        # 2 rows of data — first row preserved.
+        assert len(df) == 2
+
+    # ── 3. Cell-type fidelity ────────────────────────────────────────────
+
+    def test_string_cells_preserved(self, sample_xlsx):
+        """Strings round-trip without escaping issues."""
+        result = import_excel(sample_xlsx)
+        from gridlang.schema import parse_data
+        df = parse_data(parse_string(result).data_raw)
+        assert "Alpha" in df["Name"].tolist()
+        assert "Beta" in df["Name"].tolist()
+        assert "Gamma" in df["Name"].tolist()
+
+    def test_string_with_comma_quoted(self, tmp_path):
+        """A string containing a comma must be quoted in the CSV."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Label", "Note"])
+        ws.append(["Hello, World", "fine"])
+        f = tmp_path / "comma.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        df = parse_data(parse_string(result).data_raw)
+        assert df.iloc[0]["Label"] == "Hello, World"
+
+    def test_integer_cells_stay_integer_in_render(self, tmp_path):
+        """Whole numbers must NOT render as 1.0 / 2.0 / 3.0 ...
+
+        The bug: pandas promotes int columns with one NaN to float64. Our
+        present template now collapses 1.0 -> 1 in the table cells.
+        """
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["A", "B", "C"])
+        ws.append([1, 2, 3])
+        ws.append([4, 5, None])  # induce NaN → float64 promotion
+        f = tmp_path / "ints.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        from gridlang.runtime import execute
+        from gridlang.renderer import render
+        doc = parse_string(result)
+        df = parse_data(doc.data_raw)
+        out = execute(doc.compute_raw, df)
+        html = render(
+            template_content=doc.present_raw, df=out.df,
+            aggregates=out.aggregates, meta=doc.meta,
+        )
+        # Strip outside-of-tbody chrome to avoid false positives in CSS.
+        import re
+        body_match = re.search(r"<tbody>(.*?)</tbody>", html, re.S)
+        assert body_match, "Rendered HTML has no <tbody>"
+        body = body_match.group(1)
+        assert ">1.0<" not in body, "Integer rendered as float: 1.0"
+        assert ">5.0<" not in body, "Integer rendered as float: 5.0"
+        assert ">1<" in body, "Integer 1 should render as plain '1'"
+        assert ">5<" in body
+
+    def test_float_with_real_decimals_kept(self, tmp_path):
+        """3.14 is NOT an integer — render as 3.14, not 3."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["v"])
+        ws.append([3.14])
+        ws.append([2.5])
+        f = tmp_path / "floats.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        # CSV output should preserve the float value.
+        doc = parse_string(result)
+        assert "3.14" in doc.data_raw
+        assert "2.5" in doc.data_raw
+
+    def test_date_cells_iso_formatted(self, tmp_path):
+        from openpyxl import Workbook
+        from datetime import datetime as dt
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["When", "What"])
+        ws.append([dt(2024, 7, 15), "launch"])
+        f = tmp_path / "dates.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        # Date should be ISO yyyy-mm-dd in the data block.
+        assert "2024-07-15" in result
+
+    def test_bool_cells_preserved(self, tmp_path):
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Active", "Name"])
+        ws.append([True, "Alice"])
+        ws.append([False, "Bob"])
+        f = tmp_path / "bools.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        # Booleans serialize as their string form.
+        assert "True" in result and "False" in result
+
+    def test_empty_cells_become_empty_strings(self, tmp_path):
+        """None cells in the middle of a row become '' in CSV, not 'None'."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["A", "B", "C"])
+        ws.append([1, None, 3])
+        f = tmp_path / "empties.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        doc = parse_string(result)
+        # Should be "1,,3" — never "1,None,3".
+        assert "None" not in doc.data_raw
+        assert "1,,3" in doc.data_raw
+
+    # ── 4. Formula extraction ────────────────────────────────────────────
+
+    def test_plain_formula_extracted(self, tmp_path):
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["v", "double"])
+        ws.append([1, "=A2*2"])
+        ws.append([2, "=A3*2"])
+        f = tmp_path / "formula.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        doc = parse_string(result)
+        # The formula text should appear in compute as a comment.
+        assert "=A2*2" in doc.compute_raw or "*2" in doc.compute_raw
+
+    def test_formulas_disabled_skips_extraction(self, tmp_path):
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["v", "double"])
+        ws.append([1, "=A2*2"])
+        f = tmp_path / "no_formulas.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f, include_formulas=False)
+        doc = parse_string(result)
+        # No formula references should appear in compute.
+        assert "*2" not in doc.compute_raw
+
+    def test_array_formula_not_dropped(self, tmp_path):
+        """ArrayFormula objects must survive extraction."""
+        from openpyxl import Workbook
+        from openpyxl.worksheet.formula import ArrayFormula
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Name", "Score"])
+        ws.append(["Alice", 90])
+        ws.append(["Bob", 80])
+        ws["C1"] = ArrayFormula("C1:C2", "=B1:B2*2")
+        f = tmp_path / "array_formula.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        doc = parse_string(result)
+        assert "B1:B2" in doc.compute_raw or "C1:C2" in doc.compute_raw, (
+            "Array formula was silently dropped"
+        )
+
+    def test_duplicate_formula_pattern_collapsed(self, tmp_path):
+        """The same formula pattern across many rows shouldn't create N comments."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["v", "x2"])
+        for i in range(2, 12):  # 10 rows of `=A{n}*2`
+            ws.append([i, f"=A{i}*2"])
+        f = tmp_path / "many_formulas.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        doc = parse_string(result)
+        # The "=A2*2" pattern (with N for digits) should appear at most once
+        # in the deduped block — count its concrete instances.
+        occurrences = doc.compute_raw.count("*2")
+        assert occurrences <= 3, (
+            f"Expected dedup of identical formula pattern; saw {occurrences}"
+        )
+
+    # ── 5. Trailing summary rows ─────────────────────────────────────────
 
     def test_trailing_summary_row_separated(self, tmp_path):
         """Trailing `=SUM(...)` row goes into compute, not data."""
@@ -196,52 +458,159 @@ class TestExcelImport:
         ws.append(["Alice", 90])
         ws.append(["Bob", 80])
         ws.append(["Carol", 70])
-        # Trailing summary row in column B, rest empty.
         ws["A5"] = None
         ws["B5"] = "=SUM(B2:B4)"
         f = tmp_path / "with_summary.xlsx"
         wb.save(f); wb.close()
 
         result = import_excel(f)
-
-        # Data section must NOT contain the SUM formula or its placeholder.
-        # Pull just the data block to be specific.
-        from gridlang.parser import parse_string
         doc = parse_string(result)
         assert "=SUM" not in doc.data_raw
-        # The compute section should mention it explicitly.
         assert "=SUM(B2:B4)" in doc.compute_raw or "Summary cells" in doc.compute_raw
 
-        # And the data rows survive intact.
         from gridlang.schema import parse_data
         df = parse_data(doc.data_raw)
         assert len(df) == 3
         assert set(df["Name"]) == {"Alice", "Bob", "Carol"}
 
-    def test_array_formula_not_dropped(self, tmp_path):
-        """ArrayFormula objects (dynamic arrays) get extracted, not silently dropped."""
+    def test_trailing_summary_row_with_blank_above_handled(self, tmp_path):
+        """Blank rows between data and a summary row are still skipped."""
         from openpyxl import Workbook
-        from openpyxl.worksheet.formula import ArrayFormula
         wb = Workbook()
         ws = wb.active
-        ws.append(["Name", "Score"])
-        ws.append(["Alice", 90])
-        ws.append(["Bob", 80])
-        # Park an array formula at C1:C2.
-        ws["C1"] = ArrayFormula("C1:C2", "=B1:B2*2")
-        f = tmp_path / "array_formula.xlsx"
+        ws.append(["A", "B"])
+        ws.append([1, 10])
+        ws.append([2, 20])
+        # blank row 4
+        ws["B5"] = "=SUM(B2:B3)"
+        f = tmp_path / "summary_with_gap.xlsx"
         wb.save(f); wb.close()
 
         result = import_excel(f)
-
-        # Array formula's text should land somewhere in the compute section.
-        # (Exact rendering varies by openpyxl version; just look for the body.)
-        from gridlang.parser import parse_string
         doc = parse_string(result)
-        compute = doc.compute_raw
-        assert "B1:B2" in compute or "C1:C2" in compute, (
-            "Array formula text was silently dropped: " + compute[:300]
+        assert "=SUM" not in doc.data_raw
+        assert "Summary cells" in doc.compute_raw or "=SUM" in doc.compute_raw
+
+    # ── 6. Detached scattered rows ───────────────────────────────────────
+
+    def test_detached_sparse_row_filtered_out_of_data(self, tmp_path):
+        """A sparse row separated from the dense main block by blank rows
+        is moved to compute, not the data CSV."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        for v in range(1, 6):  # rows 1-5: dense data
+            ws.append([v, v, v, v])
+        # rows 6, 7 are blank (skipped by openpyxl)
+        ws["A8"] = 999  # detached sparse row
+        ws["B8"] = 888
+        f = tmp_path / "detached.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        doc = parse_string(result)
+        # Detached cells must NOT appear in data CSV.
+        assert "999" not in doc.data_raw
+        assert "888" not in doc.data_raw
+        # They should be flagged in compute.
+        assert "A8" in doc.compute_raw and "999" in doc.compute_raw
+
+    def test_dense_main_block_intact_when_no_detached(self, tmp_path):
+        """A clean dense block stays in data; nothing flagged as detached."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["A", "B"])
+        ws.append([1, 2])
+        ws.append([3, 4])
+        f = tmp_path / "clean.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        doc = parse_string(result)
+        assert "Detached cells" not in doc.compute_raw
+        from gridlang.schema import parse_data
+        df = parse_data(doc.data_raw)
+        assert len(df) == 2
+
+    # ── 7. End-to-end render ─────────────────────────────────────────────
+
+    def test_e2e_render_no_floaty_integers(self, tmp_path):
+        """The full pipeline (import → parse → execute → render) on a
+        sheet that triggers float-promotion must NOT show 1.0 / 2.0 …"""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        for v in range(1, 11):
+            ws.append([v] * 5)
+        # One row with an empty cell to force NaN → float64 promotion
+        ws.append([99, None, None, None, None])
+        f = tmp_path / "render_check.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        from gridlang.runtime import execute
+        from gridlang.renderer import render
+        doc = parse_string(result)
+        df = parse_data(doc.data_raw)
+        out = execute(doc.compute_raw, df)
+        html = render(
+            template_content=doc.present_raw, df=out.df,
+            aggregates=out.aggregates, meta=doc.meta,
         )
+        # The detached row [99, None×4] should be filtered out.
+        # The remaining 10 rows of all-equal numbers must render as int.
+        import re
+        body = re.search(r"<tbody>(.*?)</tbody>", html, re.S).group(1)
+        for n in range(1, 11):
+            assert f">{n}<" in body, f"Missing integer cell '{n}' in rendered HTML"
+            assert f">{n}.0<" not in body, f"Integer {n} rendered as float {n}.0"
+
+    # ── 8. Multi-sheet, sheet selection, errors ──────────────────────────
+
+    def test_specific_sheet(self, sample_xlsx):
+        result = import_excel(sample_xlsx, sheet_names=["Data"])
+        assert "Alpha" in result
+
+    def test_unknown_sheet_raises(self, sample_xlsx):
+        from gridlang.excel_import import ImportError_
+        with pytest.raises(ImportError_):
+            import_excel(sample_xlsx, sheet_names=["Nonexistent"])
+
+    def test_multi_sheet_emits_named_sections(self, tmp_path):
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws1 = wb.active; ws1.title = "Sales"
+        ws1.append(["Region", "Total"]); ws1.append(["North", 100])
+        ws2 = wb.create_sheet("Expenses")
+        ws2.append(["Item", "Cost"]); ws2.append(["Rent", 50])
+        f = tmp_path / "multi.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        # Both sheet sections present.
+        assert "--- data:sales ---" in result
+        assert "--- data:expenses ---" in result
+        assert "North" in result and "Rent" in result
+
+    def test_file_not_found(self):
+        with pytest.raises(FileNotFoundError):
+            import_excel("/nonexistent/file.xlsx")
+
+    def test_empty_sheet_produces_valid_grid(self, tmp_path):
+        """A sheet with no data shouldn't crash — emits a stub .grid."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        # No rows appended — the sheet exists but is blank.
+        f = tmp_path / "empty.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        # Still parses as a valid 4-section file.
+        doc = parse_string(result)
+        assert "def transform" in doc.compute_raw
 
 
 class TestExcelExport:

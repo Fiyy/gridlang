@@ -88,6 +88,7 @@ def import_excel(
     all_formulas = {}  # sheet_name → list of formula info
     all_styles = {}    # sheet_name → style info
     all_summaries = {}  # sheet_name → list of {coord, formula, value}
+    all_extras = {}     # sheet_name → list of {coord, value} (detached cells)
 
     for sheet_name in target_sheets:
         ws_data = wb_data[sheet_name]
@@ -100,12 +101,14 @@ def import_excel(
             safe_name = _safe_sheet_name(sheet_name)
             parts.append(f"--- data:{safe_name} ---")
 
-        csv_content, summary_rows = _extract_sheet_data(ws_data, ws_formula)
+        csv_content, summary_rows, extra_cells = _extract_sheet_data(ws_data, ws_formula)
         parts.append(csv_content)
         parts.append("")
 
         if summary_rows:
             all_summaries[sheet_name] = summary_rows
+        if extra_cells:
+            all_extras[sheet_name] = extra_cells
 
         # Collect formulas
         if ws_formula and include_formulas:
@@ -121,7 +124,9 @@ def import_excel(
 
     # --- compute ---
     parts.append("--- compute ---")
-    compute_code = _generate_compute_section(all_formulas, target_sheets, all_summaries)
+    compute_code = _generate_compute_section(
+        all_formulas, target_sheets, all_summaries, all_extras
+    )
     parts.append(compute_code)
     parts.append("")
 
@@ -217,11 +222,17 @@ def _is_summary_row(row: tuple, formula_row: Optional[tuple] = None) -> bool:
     return False
 
 
-def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict]]:
-    """Extract sheet data as CSV string. Returns (csv, summary_rows).
+def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict], list[dict]]:
+    """Extract sheet data as CSV string.
 
-    `summary_rows` is a list of {'coord', 'formula', 'value'} dicts for any
-    formula-only trailing rows that were filtered out of the data CSV.
+    Returns ``(csv, summary_rows, extra_cells)``:
+
+      * ``summary_rows`` — trailing single-cell formula rows (e.g.
+        ``=SUM(A1:I26)`` in A27) pulled out of the data block.
+      * ``extra_cells`` — sparse rows that are *detached* from the main
+        data block by a blank-row gap and have far lower fill density.
+        They are kept for documentation in the compute section but
+        removed from the data CSV so they don't pollute dtypes / layout.
     """
     # Collect all rows up front so we can decide:
     #   1) whether row 1 is a header
@@ -267,36 +278,132 @@ def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict]]:
 
     summary_rows.reverse()  # restore top-to-bottom order
 
-    # ── 2. Drop trailing blank rows that came BEFORE the now-last data row,
-    #       AND any rows we already trimmed.
-    rows_in = raw_rows[:end]
-    # Filter blank rows everywhere (preserves prior behaviour for the body).
-    body_rows = [r for r in rows_in if not all(c is None for c in r)]
+    # ── 2. Look at remaining rows. Keep their 1-based row numbers so we
+    #       can detect "detached" sparse rows separated by a blank gap.
+    rows_in = [(r_idx + 1, raw_rows[r_idx]) for r_idx in range(end)]
+    # Drop fully-blank rows up front; we record gaps via row numbers.
+    body = [(rn, r) for rn, r in rows_in
+            if not all(c is None or str(c).strip() == "" for c in r)]
 
-    if not body_rows:
-        return "", summary_rows
+    if not body:
+        return "", summary_rows, []
 
-    # ── 3. Decide whether row 1 is a header or data.
-    has_header = _looks_like_header_row(body_rows[0])
+    n_cols = max(len(r) for _, r in body)
+
+    def _density(row):
+        non_empty = sum(1 for c in row if c is not None and str(c).strip() != "")
+        return non_empty / n_cols if n_cols else 0.0
+
+    # ── 3. Find the main data block: the longest run of rows whose
+    #       row numbers are consecutive AND density is roughly uniform.
+    #       Anything detached from it by a blank-row gap with much lower
+    #       density is treated as a stray "extra" cell-set.
+    runs = []  # list[list[int]] of indexes into `body`
+    cur_run = [0]
+    for i in range(1, len(body)):
+        prev_rn, prev = body[i - 1]
+        cur_rn, cur = body[i]
+        if cur_rn == prev_rn + 1:  # consecutive
+            cur_run.append(i)
+        else:
+            runs.append(cur_run)
+            cur_run = [i]
+    runs.append(cur_run)
+
+    # Pick the "main" run = the one whose total fill (sum of densities)
+    # is largest. That's robust against a single dense outlier row.
+    main_run_idx = max(range(len(runs)),
+                       key=lambda k: sum(_density(body[i][1]) for i in runs[k]))
+    main_run = set(runs[main_run_idx])
+    # Lowest density in the main run is our floor — anything in a *separate*
+    # run that's well below that floor is treated as a detached stray.
+    main_run_densities = [_density(body[i][1]) for i in runs[main_run_idx]]
+    main_floor = min(main_run_densities) if main_run_densities else 1.0
+
+    # ── 4. Walk body rows, separating main-block rows from detached extras.
+    keep_rows = []          # list[(row_num, row_tuple)] for the data CSV
+    extra_cells = []        # list[{'coord','value'}] for the compute annex
+    for run_idx, run in enumerate(runs):
+        if run_idx == main_run_idx:
+            for i in run:
+                keep_rows.append(body[i])
+            continue
+        # A run is "detached and noisy" when its mean density is well
+        # below the sparsest main-block row — concretely, < 2/3 of the
+        # main floor. Otherwise we keep it (e.g. user just had a blank
+        # separator row above genuine data).
+        run_density = sum(_density(body[i][1]) for i in run) / len(run)
+        if run_density < (2.0 / 3.0) * main_floor:
+            for i in run:
+                rn, row = body[i]
+                for col_idx, val in enumerate(row):
+                    if val is None or str(val).strip() == "":
+                        continue
+                    coord = f"{get_column_letter(col_idx + 1)}{rn}"
+                    extra_cells.append({"coord": coord, "value": val})
+        else:
+            for i in run:
+                keep_rows.append(body[i])
+
+    if not keep_rows:
+        # Edge case: nothing made it past the filter — fall back to body.
+        keep_rows = body
+        extra_cells = []
+
+    # ── 5. Decide whether row 1 of keep_rows is a header or data.
+    first_row = keep_rows[0][1]
+    has_header = _looks_like_header_row(first_row)
     if has_header:
-        header_row = body_rows[0]
-        data_rows = body_rows[1:]
+        header_row = first_row
+        data_rows = [r for _, r in keep_rows[1:]]
         headers = [_clean_column_name(str(c) if c is not None else "") for c in header_row]
     else:
         # Synthesize col_A, col_B, ... headers from column count.
-        n_cols = max(len(r) for r in body_rows)
         headers = [f"col_{get_column_letter(i + 1)}" for i in range(n_cols)]
-        data_rows = body_rows
+        data_rows = [r for _, r in keep_rows]
 
-    # ── 4. Serialize.
+    # ── 6. Detect per-column integer-ness so we don't have to write
+    #       `1.0`. We scan all kept data rows and emit ints when the
+    #       column's values are exclusively whole numbers (or empty).
+    col_is_int = []
+    for col in range(n_cols):
+        all_int = True
+        seen_any = False
+        for row in data_rows:
+            v = row[col] if col < len(row) else None
+            if v is None or (isinstance(v, str) and v.strip() == ""):
+                continue
+            seen_any = True
+            if isinstance(v, bool):
+                # bools shouldn't drive int-ness either way
+                all_int = False; break
+            if isinstance(v, int):
+                continue
+            if isinstance(v, float):
+                if v != v:  # NaN
+                    continue
+                if v == int(v):
+                    continue
+                all_int = False; break
+            # any non-numeric breaks the int run
+            all_int = False; break
+        col_is_int.append(seen_any and all_int)
+
+    # ── 7. Serialize.
     csv_lines = [",".join(headers)]
     for row in data_rows:
         csv_row = []
-        for cell in row:
+        for col_idx, cell in enumerate(row):
             if cell is None:
                 csv_row.append("")
             elif isinstance(cell, datetime):
                 csv_row.append(cell.strftime("%Y-%m-%d"))
+            elif col_idx < len(col_is_int) and col_is_int[col_idx] and isinstance(cell, (int, float)):
+                # Whole number in an integer column → emit as int.
+                if isinstance(cell, float) and cell != cell:  # NaN
+                    csv_row.append("")
+                else:
+                    csv_row.append(str(int(cell)))
             elif isinstance(cell, float) and cell == int(cell):
                 csv_row.append(str(int(cell)))
             else:
@@ -306,7 +413,7 @@ def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict]]:
                 csv_row.append(val)
         csv_lines.append(",".join(csv_row))
 
-    return "\n".join(csv_lines), summary_rows
+    return "\n".join(csv_lines), summary_rows, extra_cells
 
 
 def _clean_column_name(name: str) -> str:
@@ -616,6 +723,7 @@ def _generate_compute_section(
     all_formulas: dict,
     sheet_names: list[str],
     all_summaries: Optional[dict] = None,
+    all_extras: Optional[dict] = None,
 ) -> str:
     """Generate compute section from extracted formulas."""
     lines = []
@@ -623,8 +731,9 @@ def _generate_compute_section(
 
     has_formulas = any(formulas for formulas in all_formulas.values())
     has_summaries = bool(all_summaries) and any(s for s in (all_summaries or {}).values())
+    has_extras = bool(all_extras) and any(e for e in (all_extras or {}).values())
 
-    if has_formulas or has_summaries:
+    if has_formulas or has_summaries or has_extras:
         lines.append("    # Auto-converted from Excel formulas")
         lines.append("    # Review and adjust as needed")
         lines.append("")
@@ -647,6 +756,19 @@ def _generate_compute_section(
                     lines.append(f"    # Cell {coord}: {formula}  (cached value: {value})")
                     if py_hint and not py_hint.startswith("#"):
                         lines.append(f"    # → {py_hint}")
+                lines.append("")
+
+        # Detached "extra" cells — sparse rows that were below the main data block
+        if has_extras:
+            for sheet_name, extras in all_extras.items():
+                if not extras:
+                    continue
+                if len(all_extras) > 1:
+                    lines.append(f"    # --- Detached cells for sheet: {sheet_name} ---")
+                else:
+                    lines.append("    # --- Detached cells (separated from main data block by blank rows) ---")
+                for e in extras:
+                    lines.append(f"    # Cell {e['coord']}: {e['value']!r}")
                 lines.append("")
 
         if has_formulas:
@@ -789,7 +911,13 @@ def _generate_present_section(all_styles: dict, sheet_names: list[str]) -> str:
     lines.append('    {% for _, row in df.iterrows() %}')
     lines.append('    <tr>')
     lines.append('      {% for col in df.columns %}')
-    lines.append('      <td>{{ row[col] }}</td>')
+    # Pandas promotes "int columns with one NaN" to float64, so a clean
+    # integer like 5 prints as "5.0". Strip the .0 in the template.
+    # We also blank out NaN cells so they don't render as "nan".
+    lines.append('      {% set v = row[col] %}')
+    lines.append('      <td>{% if v is none or v != v %}{# NaN #}'
+                 '{% elif v is number and (v | int) == v %}{{ v | int }}'
+                 '{% else %}{{ v }}{% endif %}</td>')
     lines.append('      {% endfor %}')
     lines.append('    </tr>')
     lines.append('    {% endfor %}')
