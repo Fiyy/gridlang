@@ -3,273 +3,803 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GridLang — Online Demo</title>
-<meta name="description" content="GridLang online playground — AI-native spreadsheet format running entirely in your browser via Pyodide. Import Excel/CSV, edit cells, export back, all client-side.">
+<title>GridLang — AI-native Spreadsheet Format</title>
+<meta name="description" content="GridLang is an AI-native, plain-text spreadsheet format. Data, formulas, charts, and live collaboration in a single human-readable file. Try the in-browser playground.">
+<meta property="og:title" content="GridLang — AI-native Spreadsheet Format">
+<meta property="og:description" content="Plain-text. Git-friendly. AI-readable. Try it live in your browser — no install.">
+<meta property="og:type" content="website">
+
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
-    --bg: #0f172a; --bg2: #1e293b; --bg3: #283548; --border: #334155;
-    --text: #e2e8f0; --dim: #94a3b8; --accent: #3b82f6;
-    --green: #10b981; --red: #ef4444; --yellow: #f59e0b;
-    --bar-h: 46px; --tab-h: 32px;
+    --bg: #0b1120;
+    --bg2: #0f172a;
+    --bg3: #1e293b;
+    --bg4: #283548;
+    --border: #334155;
+    --text: #e2e8f0;
+    --dim: #94a3b8;
+    --dim2: #64748b;
+    --accent: #3b82f6;
+    --accent2: #8b5cf6;
+    --green: #10b981;
+    --pink: #ec4899;
+    --yellow: #f59e0b;
+    --red: #ef4444;
+  }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    line-height: 1.6;
+    scroll-behavior: smooth;
   }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    background: var(--bg); color: var(--text); height: 100vh; overflow: hidden;
+    overflow-x: hidden;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: #60a5fa; }
+
+  /* ── Top nav ────────────────────────────────────────────────────────── */
+  .nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    height: 60px;
+    background: rgba(15, 23, 42, 0.85);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 32px; gap: 24px;
+  }
+  .logo {
+    font-weight: 700; font-size: 18px; color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .logo .pulse {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6);
+    animation: pulse 2.2s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6); }
+    70%  { box-shadow: 0 0 0 12px rgba(16, 185, 129, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+  }
+  .nav .sep { flex: 1; }
+  .nav-link {
+    color: var(--dim); font-size: 14px; padding: 6px 12px; border-radius: 6px;
+    transition: all 0.15s;
+  }
+  .nav-link:hover { color: var(--text); background: var(--bg3); }
+  .nav-cta {
+    padding: 7px 18px; border-radius: 7px; background: var(--accent);
+    color: #fff; font-size: 13px; font-weight: 600;
+    transition: transform 0.15s, background 0.15s;
+  }
+  .nav-cta:hover { background: #2563eb; color: #fff; transform: translateY(-1px); }
+
+  /* ── Hero ───────────────────────────────────────────────────────────── */
+  .hero {
+    padding: 120px 32px 80px; max-width: 1200px; margin: 0 auto;
+    text-align: center; position: relative;
+  }
+  /* Subtle moving grid background */
+  .hero::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none; z-index: -1;
+    background-image:
+      linear-gradient(rgba(59, 130, 246, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(59, 130, 246, 0.05) 1px, transparent 1px);
+    background-size: 50px 50px;
+    mask-image: radial-gradient(ellipse 80% 50% at 50% 30%, #000 30%, transparent 80%);
+    -webkit-mask-image: radial-gradient(ellipse 80% 50% at 50% 30%, #000 30%, transparent 80%);
+    animation: grid-drift 20s linear infinite;
+  }
+  @keyframes grid-drift {
+    0%   { background-position: 0 0; }
+    100% { background-position: 50px 50px; }
+  }
+  .hero .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: #93c5fd; padding: 5px 14px; border-radius: 100px;
+    font-size: 12px; font-weight: 500; margin-bottom: 20px;
+  }
+  .hero h1 {
+    font-size: clamp(36px, 6vw, 64px); font-weight: 800;
+    background: linear-gradient(135deg, #fff 0%, #93c5fd 50%, #c4b5fd 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+    line-height: 1.1; margin-bottom: 18px; letter-spacing: -0.02em;
+  }
+  .hero h2 {
+    font-size: clamp(15px, 2vw, 19px); color: var(--dim); font-weight: 400;
+    max-width: 720px; margin: 0 auto 36px; line-height: 1.55;
+  }
+  .hero h2 b { color: var(--text); font-weight: 600; }
+  .cta-row {
+    display: flex; gap: 14px; justify-content: center; flex-wrap: wrap;
+    margin-bottom: 50px;
+  }
+  .cta-primary {
+    padding: 14px 32px; border-radius: 10px; font-size: 15px; font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #fff; box-shadow: 0 8px 24px rgba(59, 130, 246, 0.35);
+    transition: transform 0.18s, box-shadow 0.18s;
+    position: relative; overflow: hidden;
+  }
+  .cta-primary:hover {
+    color: #fff;
+    transform: translateY(-2px);
+    box-shadow: 0 12px 30px rgba(59, 130, 246, 0.5);
+  }
+  .cta-primary::after {
+    content: '→'; margin-left: 8px;
+    transition: transform 0.18s;
+  }
+  .cta-primary:hover::after { transform: translateX(4px); }
+  .cta-secondary {
+    padding: 14px 24px; border-radius: 10px; font-size: 15px; font-weight: 500;
+    background: var(--bg3); color: var(--text); border: 1px solid var(--border);
+    transition: all 0.15s;
+  }
+  .cta-secondary:hover {
+    background: var(--bg4); color: var(--text); border-color: var(--accent);
   }
 
-  /* ── Toolbar ── */
-  .bar {
-    height: var(--bar-h); background: var(--bg2); border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; padding: 0 16px; gap: 10px; flex-wrap: nowrap;
+  /* ── Stats ──────────────────────────────────────────────────────────── */
+  .stats {
+    display: flex; gap: 36px; justify-content: center; flex-wrap: wrap;
+    color: var(--dim); font-size: 13px; margin-bottom: 50px;
   }
-  .bar .logo {
-    font-weight: 700; font-size: 16px; color: var(--accent);
-    display: flex; align-items: center; gap: 6px;
-  }
-  .bar .logo small { font-size: 10px; color: var(--dim); font-weight: 500; }
-  .bar select {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    padding: 5px 10px; border-radius: 5px; font-size: 12px; cursor: pointer;
-    max-width: 220px;
-  }
-  .bar select:hover { border-color: var(--accent); }
-  .bar .sep { flex: 1; }
-  .bar .st {
-    font-size: 11px; padding: 3px 10px; border-radius: 4px; font-weight: 500;
-    white-space: nowrap;
-  }
-  .bar .st.ok { background: #064e3b; color: #6ee7b7; }
-  .bar .st.err { background: #7f1d1d; color: #fca5a5; }
-  .bar .st.busy { background: #1e3a5f; color: #93c5fd; }
-  .bar button {
-    padding: 5px 12px; border-radius: 5px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--text); font-size: 12px; cursor: pointer;
-    white-space: nowrap;
-  }
-  .bar button:hover { background: var(--bg3); border-color: var(--accent); }
-  .bar button:disabled { opacity: 0.4; cursor: not-allowed; }
-  .bar button.pri { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .bar button.pri:hover { background: #2563eb; }
-  .bar a {
-    color: var(--dim); font-size: 11px; text-decoration: none; padding: 4px 8px;
-    border-radius: 4px;
-  }
-  .bar a:hover { color: var(--text); background: var(--bg3); }
+  .stats .stat b { color: var(--text); font-size: 24px; font-weight: 700; display: block; }
 
-  /* ── Loading overlay ── */
-  .loading {
-    position: fixed; inset: 0; background: rgba(15, 23, 42, 0.95); z-index: 1000;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    color: var(--text); gap: 16px;
+  /* ── Animated demo card (the centerpiece) ───────────────────────────── */
+  .demo-card {
+    max-width: 980px; margin: 0 auto;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
   }
-  .loading.hidden { display: none; }
-  .loading h1 { font-size: 24px; color: var(--accent); margin-bottom: 4px; }
-  .loading .sub { color: var(--dim); font-size: 13px; }
-  .loading progress {
-    width: 320px; height: 6px; -webkit-appearance: none; appearance: none;
-    border: none; background: var(--bg2); border-radius: 3px; overflow: hidden;
+  .demo-tabs {
+    background: var(--bg3); padding: 10px 16px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--border);
   }
-  .loading progress::-webkit-progress-bar { background: var(--bg2); }
-  .loading progress::-webkit-progress-value { background: var(--accent); transition: width 0.3s; }
-  .loading progress::-moz-progress-bar { background: var(--accent); }
-  .loading .step {
-    color: var(--dim); font: 12px 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    height: 18px;
+  .traffic { display: flex; gap: 6px; margin-right: 14px; }
+  .traffic span { width: 12px; height: 12px; border-radius: 50%; }
+  .traffic span:nth-child(1) { background: #ff5f56; }
+  .traffic span:nth-child(2) { background: #ffbd2e; }
+  .traffic span:nth-child(3) { background: #27c93f; }
+  .demo-tab {
+    padding: 4px 12px; font-size: 12px; color: var(--dim);
+    border-radius: 4px; cursor: pointer; user-select: none;
+    transition: all 0.15s;
   }
-  .loading .err {
-    color: var(--red); font: 12px monospace; max-width: 600px; white-space: pre-wrap;
-    background: #1c1917; padding: 12px; border-radius: 6px; border: 1px solid var(--red);
-    display: none;
+  .demo-tab.active { background: var(--bg4); color: var(--text); }
+  .demo-tab:hover { color: var(--text); }
+  .demo-grid {
+    display: grid; grid-template-columns: 1fr 1fr; min-height: 360px;
   }
+  .demo-grid > div { padding: 22px; min-height: 360px; }
+  .demo-source {
+    background: var(--bg2); font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px; line-height: 1.7;
+    border-right: 1px solid var(--border);
+    overflow: auto; white-space: pre;
+  }
+  .demo-source .k { color: #c4b5fd; }            /* meta keys */
+  .demo-source .s { color: #fbbf24; }            /* strings */
+  .demo-source .c { color: var(--dim2); }        /* comments / sections */
+  .demo-source .f { color: #6ee7b7; }            /* formulas */
+  .demo-source .n { color: #f87171; }            /* numbers */
+  .demo-source .pulse-line { background: rgba(59, 130, 246, 0.12); }
 
-  /* ── Layout ── */
-  .main { display: flex; height: calc(100vh - var(--bar-h)); }
-
-  /* ── Editor ── */
-  .ed-pane {
-    width: 50%; min-width: 280px; display: flex; flex-direction: column;
-    border-right: 2px solid var(--border); position: relative;
+  .demo-render {
+    background: #f8fafc; color: #0f172a;
+    overflow: auto;
   }
-  .ed-tabs {
-    height: var(--tab-h); background: var(--bg); display: flex; align-items: center;
-    padding: 0 10px; border-bottom: 1px solid var(--border); gap: 4px;
+  .demo-render h3 {
+    font-size: 14px; color: #334155; margin-bottom: 14px;
+    font-weight: 700; letter-spacing: 0.02em;
   }
-  .ed-tab {
-    padding: 4px 12px; font-size: 11px; background: var(--bg2); color: var(--text);
-    border-radius: 3px 3px 0 0; border: 1px solid var(--border); border-bottom: none;
-    font-weight: 500;
+  .demo-table {
+    width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 14px;
   }
-  .ed-meta { color: var(--dim); font-size: 11px; margin-left: auto; }
-
-  .ed-wrap { flex: 1; display: flex; overflow: hidden; min-height: 0; }
-  .ed-lines {
-    width: 46px; background: var(--bg); color: #475569;
-    font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    text-align: right; padding: 10px 8px 10px 0; overflow: hidden; user-select: none;
-    border-right: 1px solid var(--border); flex-shrink: 0;
+  .demo-table th {
+    background: #1e40af; color: #fff; padding: 6px 8px; text-align: left;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
   }
-  .ed-input {
-    flex: 1; background: var(--bg); color: #cbd5e1; border: none; outline: none;
-    resize: none; font: 13px/20px 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    padding: 10px 14px; tab-size: 4; white-space: pre; overflow: auto;
-    caret-color: var(--accent);
+  .demo-table td {
+    padding: 4px 8px; border: 1px solid #e2e8f0;
   }
-  .ed-input::selection { background: rgba(59, 130, 246, 0.35); }
-
-  .err-box {
-    display: none; background: #1c1917; color: #fca5a5; padding: 10px 14px;
-    font: 12px/18px monospace; max-height: 120px; overflow-y: auto;
-    border-top: 2px solid var(--red);
-  }
-  .err-box.vis { display: block; }
-
-  /* ── Resize Handle ── */
-  .resizer {
-    width: 5px; cursor: col-resize; background: transparent; z-index: 10; flex-shrink: 0;
-  }
-  .resizer:hover, .resizer.on { background: var(--accent); }
-
-  /* ── Preview ── */
-  .pv-pane { flex: 1; display: flex; flex-direction: column; background: #fff; }
-  .pv-bar {
-    height: var(--tab-h); background: #f8fafc; border-bottom: 1px solid #e2e8f0;
-    display: flex; align-items: center; padding: 0 12px; gap: 8px;
-  }
-  .pv-bar span.lbl { font-size: 11px; color: #64748b; }
-  .pv-dot { width: 8px; height: 8px; border-radius: 50%; }
-  .pv-dot.g { background: var(--green); }
-  .pv-dot.r { background: var(--red); }
-  .pv-dot.y { background: var(--yellow); }
-  .pv-tabs { display: flex; gap: 0; margin-left: auto; }
-  .pv-tab {
-    padding: 4px 14px; font-size: 11px; cursor: pointer; color: #64748b;
-    border-bottom: 2px solid transparent; user-select: none;
-  }
-  .pv-tab.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
-  .pv-tab:hover { color: #1e40af; }
-  #pv-frame { flex: 1; border: none; width: 100%; background: #fff; }
-  #pv-data { flex: 1; overflow: auto; display: none; padding: 0; }
-  #pv-data table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  #pv-data th {
-    background: #1e40af; color: #fff; padding: 7px 10px; font-weight: 600;
-    text-align: left; font-size: 11px; position: sticky; top: 0; z-index: 1;
-    text-transform: uppercase; letter-spacing: 0.04em;
-  }
-  #pv-data td {
-    padding: 4px 8px; border: 1px solid #e2e8f0; cursor: cell; min-width: 70px;
-    font-size: 12px;
-  }
-  #pv-data td:focus {
-    outline: 2px solid var(--accent); outline-offset: -2px; background: #eff6ff;
-  }
-  #pv-data tr:hover td { background: #f8fafc; }
-  #pv-data td.edited { background: #fefce8; }
-  #pv-data td.row-num {
-    text-align: center; color: #94a3b8; background: #f9fafb; font-size: 11px;
-    cursor: default; min-width: 40px;
+  .demo-table td.computed { color: #2563eb; font-weight: 600; }
+  .demo-table tr.flash td { animation: flash 1.2s ease-out; }
+  @keyframes flash {
+    0%   { background: rgba(59, 130, 246, 0); }
+    20%  { background: rgba(59, 130, 246, 0.25); }
+    100% { background: rgba(59, 130, 246, 0); }
   }
 
-  /* ── Hint ── */
-  .hint {
-    position: fixed; bottom: 8px; right: 12px; font-size: 10px; color: #475569;
-    z-index: 50;
+  .demo-bar-chart {
+    display: flex; align-items: flex-end; height: 110px; gap: 8px;
+    margin-top: 6px; padding: 0 4px 16px;
+    border-bottom: 1px solid #e2e8f0; position: relative;
   }
-  .hint kbd {
-    background: var(--bg2); padding: 1px 6px; border-radius: 3px;
-    border: 1px solid var(--border); font-family: monospace;
+  .demo-bar {
+    flex: 1; background: linear-gradient(180deg, var(--accent), #1e40af);
+    border-radius: 4px 4px 0 0; position: relative;
+    transition: height 1.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+    min-height: 0;
+  }
+  .demo-bar::after {
+    content: attr(data-label);
+    position: absolute; bottom: -18px; left: 0; right: 0;
+    text-align: center; font-size: 10px; color: #64748b;
+  }
+  .demo-bar::before {
+    content: attr(data-value);
+    position: absolute; top: -18px; left: 0; right: 0;
+    text-align: center; font-size: 10px; color: #1e40af; font-weight: 600;
   }
 
-  /* ── Hidden input + dropdown ── */
-  #file-input { display: none; }
-  .dropdown {
-    display: none; position: fixed; background: var(--bg2); border: 1px solid var(--border);
-    border-radius: 6px; padding: 4px 0; z-index: 999;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  /* Live cursor / collaboration animation */
+  .demo-cursor {
+    position: absolute; pointer-events: none; z-index: 5;
+    transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1);
   }
-  .dropdown.vis { display: block; }
-  .dropdown-item {
-    padding: 8px 18px; font-size: 12px; cursor: pointer; color: var(--text);
-    white-space: nowrap;
+  .demo-cursor svg { display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.25)); }
+  .demo-cursor .lbl {
+    position: absolute; top: 14px; left: 16px;
+    background: var(--pink); color: #fff;
+    padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; font-weight: 600; white-space: nowrap;
   }
-  .dropdown-item:hover { background: var(--bg3); }
+
+  /* ── Sections ──────────────────────────────────────────────────────── */
+  .section {
+    max-width: 1200px; margin: 0 auto; padding: 80px 32px;
+  }
+  .section h2 {
+    font-size: 32px; font-weight: 800; text-align: center; margin-bottom: 14px;
+    letter-spacing: -0.01em;
+  }
+  .section .lead {
+    text-align: center; color: var(--dim); font-size: 16px;
+    max-width: 640px; margin: 0 auto 50px;
+  }
+
+  /* ── Feature grid ───────────────────────────────────────────────────── */
+  .features {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 18px;
+  }
+  .card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 12px; padding: 26px;
+    transition: all 0.2s ease;
+    position: relative; overflow: hidden;
+  }
+  .card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    opacity: 0; transition: opacity 0.2s;
+  }
+  .card:hover {
+    transform: translateY(-3px);
+    border-color: rgba(59, 130, 246, 0.4);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  }
+  .card:hover::before { opacity: 1; }
+  .card .icon {
+    width: 40px; height: 40px; border-radius: 9px;
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.18), rgba(139, 92, 246, 0.18));
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; margin-bottom: 14px;
+  }
+  .card h3 {
+    font-size: 16px; font-weight: 700; margin-bottom: 6px; color: var(--text);
+  }
+  .card p {
+    font-size: 13.5px; color: var(--dim); line-height: 1.6;
+  }
+  .card code {
+    font-family: 'SF Mono', monospace; font-size: 12px;
+    background: var(--bg); padding: 1px 6px; border-radius: 3px;
+    color: #93c5fd; border: 1px solid var(--border);
+  }
+
+  /* ── Comparison ────────────────────────────────────────────────────── */
+  .compare {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  }
+  .compare-row {
+    display: grid; grid-template-columns: 1.5fr 2fr 2fr;
+    border-bottom: 1px solid var(--border);
+  }
+  .compare-row:last-child { border-bottom: none; }
+  .compare-row > div {
+    padding: 16px 22px; font-size: 13.5px;
+    display: flex; align-items: center;
+  }
+  .compare-row.head > div {
+    background: var(--bg3); font-weight: 700; font-size: 14px;
+    text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim);
+  }
+  .compare-row.head > div:nth-child(2) { color: #fbbf24; }
+  .compare-row.head > div:nth-child(3) { color: #6ee7b7; }
+  .compare-row > div:nth-child(1) { font-weight: 600; }
+  .compare-row > div:nth-child(2) { color: var(--dim); }
+  .compare-row > div:nth-child(3) { color: var(--text); }
+  .compare-row > div:not(:last-child) { border-right: 1px solid var(--border); }
+  .compare-row .check { color: var(--green); margin-right: 6px; font-weight: 700; }
+  .compare-row .x { color: var(--red); margin-right: 6px; font-weight: 700; }
+
+  /* ── How it works ──────────────────────────────────────────────────── */
+  .steps {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 22px;
+  }
+  .step {
+    text-align: center; padding: 26px 18px;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+    position: relative;
+  }
+  .step .num {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; font-weight: 700; color: #fff;
+    margin: 0 auto 14px;
+    box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4);
+  }
+  .step h3 { font-size: 15px; margin-bottom: 6px; }
+  .step p { font-size: 13px; color: var(--dim); line-height: 1.5; }
+
+  /* ── Final CTA + footer ────────────────────────────────────────────── */
+  .final-cta {
+    padding: 80px 32px;
+    text-align: center;
+    background: linear-gradient(180deg, transparent, rgba(59, 130, 246, 0.05));
+  }
+  .final-cta h2 {
+    font-size: 30px; font-weight: 800; margin-bottom: 12px;
+    background: linear-gradient(135deg, #fff, #93c5fd);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .final-cta p { color: var(--dim); margin-bottom: 28px; }
+
+  footer {
+    padding: 36px 32px; text-align: center; color: var(--dim2);
+    font-size: 12px; border-top: 1px solid var(--border);
+  }
+  footer a { color: var(--dim); margin: 0 10px; }
+
+  /* ── Reveal-on-scroll ──────────────────────────────────────────────── */
+  .reveal {
+    opacity: 0; transform: translateY(28px);
+    transition: opacity 0.7s ease, transform 0.7s ease;
+  }
+  .reveal.in { opacity: 1; transform: translateY(0); }
+
+  @media (max-width: 720px) {
+    .nav { padding: 0 16px; gap: 8px; }
+    .nav-link.hide-sm { display: none; }
+    .hero { padding: 100px 16px 60px; }
+    .demo-grid { grid-template-columns: 1fr; }
+    .demo-source { border-right: none; border-bottom: 1px solid var(--border); }
+    .compare-row { grid-template-columns: 1fr; }
+    .compare-row > div:not(:last-child) { border-right: none; border-bottom: 1px solid var(--border); }
+    .section { padding: 60px 16px; }
+  }
 </style>
 </head>
 <body>
 
-<!-- Loading overlay -->
-<div class="loading" id="loading">
-  <h1>📊 GridLang</h1>
-  <div class="sub">AI-native spreadsheet format — running fully in your browser</div>
-  <progress id="loading-progress" value="0" max="100"></progress>
-  <div class="step" id="loading-step">Initializing…</div>
-  <div class="err" id="loading-err"></div>
-</div>
-
-<!-- Toolbar -->
-<div class="bar">
-  <span class="logo">📊 GridLang <small id="version">v1.0</small></span>
-  <select id="example-select" title="Load an example .grid file (browser uses inline fallbacks; remote @source URLs are not fetched here)">
-    <option value="">— Examples —</option>
-  </select>
-  <button onclick="doImport()">📥 Import</button>
-  <button onclick="showExportMenu(event)">📤 Export ▾</button>
-  <button onclick="doFormat()">🎨 Format</button>
-  <button onclick="downloadGrid()">💾 Download .grid</button>
+<!-- ── Navbar ───────────────────────────────────────────────────────── -->
+<nav class="nav">
+  <span class="logo">
+    <span class="pulse"></span>
+    GridLang
+  </span>
   <span class="sep"></span>
-  <span class="st ok" id="status">Ready</span>
-  <a href="https://github.com/Fiyy/gridlang" target="_blank" rel="noopener">GitHub ↗</a>
-  <a href="https://github.com/Fiyy/gridlang/blob/main/spec/SPEC.md" target="_blank" rel="noopener">Spec ↗</a>
-</div>
+  <a class="nav-link hide-sm" href="#features">Features</a>
+  <a class="nav-link hide-sm" href="#compare">vs Excel</a>
+  <a class="nav-link hide-sm" href="#how">How it works</a>
+  <a class="nav-link hide-sm" href="https://github.com/Fiyy/gridlang" target="_blank" rel="noopener">GitHub ↗</a>
+  <a class="nav-cta" href="editor.html">Launch Editor →</a>
+</nav>
 
-<input type="file" id="file-input" accept=".xlsx,.xls,.csv,.grid" onchange="handleFile(event)">
-
-<!-- Export dropdown -->
-<div id="export-menu" class="dropdown">
-  <div class="dropdown-item" onclick="doExport('xlsx')">Export as Excel (.xlsx)</div>
-  <div class="dropdown-item" onclick="doExport('csv')">Export as CSV (.csv)</div>
-</div>
-
-<!-- Main -->
-<div class="main">
-  <!-- Editor -->
-  <div class="ed-pane" id="ed-pane">
-    <div class="ed-tabs">
-      <div class="ed-tab">📝 Source</div>
-      <span class="ed-meta" id="ed-meta">—</span>
-    </div>
-    <div class="ed-wrap">
-      <div class="ed-lines" id="lines">1</div>
-      <textarea class="ed-input" id="editor" spellcheck="false" autocomplete="off"
-        autocorrect="off" autocapitalize="off"></textarea>
-    </div>
-    <div class="err-box" id="errbox"></div>
+<!-- ── Hero ─────────────────────────────────────────────────────────── -->
+<section class="hero">
+  <div class="badge">
+    <span style="display:inline-block;width:6px;height:6px;background:#34d399;border-radius:50%;"></span>
+    v1.0 — 446 tests passing · runs in your browser
+  </div>
+  <h1>The AI-native<br>spreadsheet format.</h1>
+  <h2>
+    GridLang puts <b>data, formulas, charts, and live collaboration</b> into a single
+    plain-text file. Excel-compatible formulas, declarative SVG charts, sandboxed
+    Python/JavaScript compute, CRDT-based real-time collab — and a <b>git-friendly,
+    AI-readable</b> source format.
+  </h2>
+  <div class="cta-row">
+    <a href="editor.html" class="cta-primary">Launch the playground</a>
+    <a href="#features" class="cta-secondary">See features</a>
+  </div>
+  <div class="stats">
+    <div class="stat"><b>59</b>built-in formulas</div>
+    <div class="stat"><b>9</b>chart types</div>
+    <div class="stat"><b>2</b>compute engines (Py + JS)</div>
+    <div class="stat"><b>0</b>binary blobs</div>
   </div>
 
-  <div class="resizer" id="resizer"></div>
-
-  <!-- Preview -->
-  <div class="pv-pane">
-    <div class="pv-bar">
-      <div class="pv-dot g" id="dot"></div>
-      <span class="lbl" id="pv-st">Preview</span>
-      <div class="pv-tabs">
-        <div class="pv-tab active" data-tab="render" onclick="switchPvTab('render')">🖼️ Render</div>
-        <div class="pv-tab" data-tab="data" onclick="switchPvTab('data')">📊 Data</div>
+  <!-- Animated demo card -->
+  <div class="demo-card reveal">
+    <div class="demo-tabs">
+      <div class="traffic"><span></span><span></span><span></span></div>
+      <div class="demo-tab active">📄 sales.grid</div>
+      <div class="demo-tab">📊 Render</div>
+      <div style="flex:1"></div>
+      <div style="font-size:11px;color:var(--dim2)">▶ live preview</div>
+    </div>
+    <div class="demo-grid">
+      <!-- Source pane -->
+      <div class="demo-source" id="src-anim"></div>
+      <!-- Render pane -->
+      <div class="demo-render" style="position:relative;">
+        <h3>Q1 Sales Report</h3>
+        <table class="demo-table">
+          <thead>
+            <tr><th>Region</th><th>Jan</th><th>Feb</th><th>Mar</th><th>Total</th></tr>
+          </thead>
+          <tbody id="render-tbody"></tbody>
+        </table>
+        <h3 style="margin-top:18px;">Total by Region</h3>
+        <div class="demo-bar-chart" id="bar-chart"></div>
+        <!-- "Live cursor" of an imaginary collaborator -->
+        <div class="demo-cursor" id="cursor" style="top:74px;left:42%;">
+          <svg width="18" height="22" viewBox="0 0 18 22">
+            <path d="M0 0 L0 18 L5 14 L8 22 L11 21 L8 13 L14 13 Z"
+                  fill="#ec4899" stroke="#fff" stroke-width="1.2"/>
+          </svg>
+          <span class="lbl">Alice</span>
+        </div>
       </div>
     </div>
-    <iframe id="pv-frame" sandbox="allow-scripts"></iframe>
-    <div id="pv-data"></div>
   </div>
-</div>
+</section>
 
-<div class="hint">
-  100% client-side &nbsp;·&nbsp; Pyodide + GridLang &nbsp;·&nbsp;
-  <kbd>Ctrl</kbd>+<kbd>S</kbd> save
-</div>
+<!-- ── Features ─────────────────────────────────────────────────────── -->
+<section class="section" id="features">
+  <h2 class="reveal">Everything spreadsheets do — without the binary blob</h2>
+  <p class="lead reveal">Each capability is plain text in your <code>.grid</code> file. Diff it. Review it. Hand it to an LLM.</p>
 
-<!-- Pyodide -->
-<script src="https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.js"></script>
-<script src="app.js"></script>
+  <div class="features">
+    <div class="card reveal">
+      <div class="icon">🧮</div>
+      <h3>59 Excel-compatible formulas</h3>
+      <p><code>SUM</code>, <code>VLOOKUP</code>, <code>SUMIF</code>, <code>PIVOT</code>, <code>IF</code> — author them the way you already know. Cross-sheet refs (<code>sales!B2</code>) supported.</p>
+    </div>
+    <div class="card reveal">
+      <div class="icon">📊</div>
+      <h3>9 declarative chart types</h3>
+      <p>Bar, line, pie, scatter, area, stacked bar, heatmap, sparkline, color scale — written as <code>chart: bar</code> blocks, rendered as inline SVG.</p>
+    </div>
+    <div class="card reveal">
+      <div class="icon">🐍</div>
+      <h3>Python or JavaScript compute</h3>
+      <p>Write a <code>transform(df)</code> in either language. Python runs in a sandbox; JS runs in a Node <code>vm</code>. Set <code>engine: javascript</code> in meta.</p>
+    </div>
+    <div class="card reveal">
+      <div class="icon">🌐</div>
+      <h3>Remote data via <code>@source</code></h3>
+      <p>Load from URLs, JSON, CSV, XLSX — with caching, header injection, JSON path drilling, and inline fallback rows when the URL is denied.</p>
+    </div>
+    <div class="card reveal">
+      <div class="icon">⚡</div>
+      <h3>Live collaboration (CRDT)</h3>
+      <p>Multiple browser tabs edit the same file at once. Convergence proven via Hybrid Logical Clocks + LWW per cell. No cloud needed.</p>
+    </div>
+    <div class="card reveal">
+      <div class="icon">🪄</div>
+      <h3>Reactive cell editing</h3>
+      <p><code>{{ cell("B2") }}</code> renders an editable cell. Edit in the preview → source rewrites → re-render. Comments and other cells preserved.</p>
+    </div>
+    <div class="card reveal">
+      <div class="icon">📥</div>
+      <h3>Excel ↔ GridLang round-trip</h3>
+      <p>Import <code>.xlsx</code> with formula conversion. Export back with native Excel chart objects (Bar / Line / Pie). Or stick with <code>.csv</code>.</p>
+    </div>
+    <div class="card reveal">
+      <div class="icon">📦</div>
+      <h3>Self-contained JS bundles</h3>
+      <p><code>gridlang js-bundle</code> packages a <code>.grid</code> into one runnable JS file — Node, browser, or Web Worker. No deps. Byte-identical.</p>
+    </div>
+    <div class="card reveal">
+      <div class="icon">🤖</div>
+      <h3>AI-native by design</h3>
+      <p>An LLM can <i>read</i>, <i>diff</i>, <i>edit</i>, and <i>explain</i> a <code>.grid</code> file. Not a binary archive of XML pretending to be a spreadsheet.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Comparison ───────────────────────────────────────────────────── -->
+<section class="section" id="compare">
+  <h2 class="reveal">Excel vs GridLang</h2>
+  <p class="lead reveal">Same job. Two very different shapes.</p>
+
+  <div class="compare reveal">
+    <div class="compare-row head">
+      <div>Dimension</div>
+      <div>Excel (.xlsx)</div>
+      <div>GridLang (.grid)</div>
+    </div>
+    <div class="compare-row">
+      <div>AI readability</div>
+      <div><span class="x">✗</span>Binary archive of XML</div>
+      <div><span class="check">✓</span>Plain text, readable as-is</div>
+    </div>
+    <div class="compare-row">
+      <div>Version control</div>
+      <div><span class="x">✗</span>Diffs are opaque</div>
+      <div><span class="check">✓</span><code>git diff</code> works perfectly</div>
+    </div>
+    <div class="compare-row">
+      <div>Charts</div>
+      <div>GUI dialog → embedded blob</div>
+      <div>Declarative <code>chart: bar</code> blocks</div>
+    </div>
+    <div class="compare-row">
+      <div>Compute language</div>
+      <div>VBA macros</div>
+      <div>Python <i>or</i> JavaScript (sandboxed)</div>
+    </div>
+    <div class="compare-row">
+      <div>Live collaboration</div>
+      <div>Office 365 servers + OLE</div>
+      <div>CRDT over HTTP, no cloud</div>
+    </div>
+    <div class="compare-row">
+      <div>Testability</div>
+      <div>Nearly impossible</div>
+      <div>Standard unit tests (446 passing)</div>
+    </div>
+    <div class="compare-row">
+      <div>Bundle for browser</div>
+      <div>Closed COM/OLE objects</div>
+      <div><code>js-bundle --browser</code> → Web Worker</div>
+    </div>
+  </div>
+</section>
+
+<!-- ── How it works ─────────────────────────────────────────────────── -->
+<section class="section" id="how">
+  <h2 class="reveal">How the playground works</h2>
+  <p class="lead reveal">Open the editor and the entire toolkit boots in your tab — no servers in the loop.</p>
+
+  <div class="steps">
+    <div class="step reveal">
+      <div class="num">1</div>
+      <h3>Pyodide downloads</h3>
+      <p>~10 MB Python + WebAssembly runtime, cached after first visit</p>
+    </div>
+    <div class="step reveal">
+      <div class="num">2</div>
+      <h3>Packages install</h3>
+      <p>pandas · numpy · jinja2 · openpyxl · xlsxwriter · pyyaml — all client-side</p>
+    </div>
+    <div class="step reveal">
+      <div class="num">3</div>
+      <h3>GridLang loads</h3>
+      <p>23 Python modules fetched from the manifest, mirrored into Pyodide's virtual FS</p>
+    </div>
+    <div class="step reveal">
+      <div class="num">4</div>
+      <h3>You edit & render</h3>
+      <p>Live preview · cell-level editing · import .xlsx · export back · all 100% local</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Final CTA ───────────────────────────────────────────────────── -->
+<section class="final-cta">
+  <h2 class="reveal">Try it now — no install, no signup.</h2>
+  <p class="reveal">First load takes 15-30s while Pyodide warms up. Subsequent visits launch in seconds.</p>
+  <div class="reveal" style="margin-top:8px;">
+    <a href="editor.html" class="cta-primary">Launch the playground</a>
+  </div>
+</section>
+
+<footer>
+  <div>
+    <a href="https://github.com/Fiyy/gridlang" target="_blank" rel="noopener">GitHub</a> ·
+    <a href="https://github.com/Fiyy/gridlang/blob/main/spec/SPEC.md" target="_blank" rel="noopener">Specification</a> ·
+    <a href="https://github.com/Fiyy/gridlang/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a> ·
+    <a href="editor.html">Online Editor</a>
+  </div>
+  <div style="margin-top:8px;">MIT licensed · v1.0 · 446 tests passing</div>
+</footer>
+
+<!-- ── Animations ────────────────────────────────────────────────────── -->
+<script>
+(function () {
+  'use strict';
+
+  // ─── Reveal-on-scroll ──────────────────────────────────────────────
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+    }
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+  // ─── Animated source-typer ─────────────────────────────────────────
+  const SOURCE_TOKENS = [
+    {t: '--- meta ---\n', cls: 'c'},
+    {t: 'name', cls: 'k'}, {t: ': "Q1 Sales"\n', cls: 's'},
+    {t: 'engine', cls: 'k'}, {t: ': python\n\n', cls: 's'},
+    {t: '--- data ---\n', cls: 'c'},
+    {t: 'Region,Jan,Feb,Mar,Total\n'},
+    {t: 'North,'}, {t: '120', cls: 'n'}, {t: ','},
+    {t: '135', cls: 'n'}, {t: ','},
+    {t: '150', cls: 'n'}, {t: ','},
+    {t: '=SUM(B2:D2)', cls: 'f'}, {t: '\n'},
+    {t: 'South,'}, {t: '95', cls: 'n'}, {t: ','},
+    {t: '110', cls: 'n'}, {t: ','},
+    {t: '125', cls: 'n'}, {t: ','},
+    {t: '=SUM(B3:D3)', cls: 'f'}, {t: '\n'},
+    {t: 'West,'}, {t: '80', cls: 'n'}, {t: ','},
+    {t: '90', cls: 'n'}, {t: ','},
+    {t: '105', cls: 'n'}, {t: ','},
+    {t: '=SUM(B4:D4)', cls: 'f'}, {t: '\n\n'},
+    {t: '--- present ---\n', cls: 'c'},
+    {t: 'chart', cls: 'k'}, {t: ': bar\n'},
+    {t: '  data', cls: 'k'}, {t: ': E2:E4\n'},
+    {t: '  labels', cls: 'k'}, {t: ': A2:A4\n'},
+    {t: '  title', cls: 'k'}, {t: ': "Total by Region"\n', cls: 's'},
+  ];
+  const src = document.getElementById('src-anim');
+
+  // Renders the source as one HTML string from a list of {t,cls} segments.
+  // We type character-by-character, replaying the styled segments.
+  function renderTyped(charCount) {
+    let html = '';
+    let consumed = 0;
+    for (const seg of SOURCE_TOKENS) {
+      if (consumed >= charCount) break;
+      const remaining = charCount - consumed;
+      const slice = seg.t.slice(0, remaining);
+      const escaped = slice.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      if (seg.cls) html += `<span class="${seg.cls}">${escaped}</span>`;
+      else html += escaped;
+      consumed += seg.t.length;
+    }
+    // blinking caret at end
+    html += '<span style="opacity:.7;animation:blink 1s infinite;">▍</span>';
+    return html;
+  }
+  const TOTAL = SOURCE_TOKENS.reduce((acc, s) => acc + s.t.length, 0);
+  let charIdx = 0;
+
+  // The render-side rows we'll fill in as the source types.
+  const ROWS = [
+    {region: 'North', jan: 120, feb: 135, mar: 150, total: 405},
+    {region: 'South', jan: 95,  feb: 110, mar: 125, total: 330},
+    {region: 'West',  jan: 80,  feb: 90,  mar: 105, total: 275},
+  ];
+  const tbody = document.getElementById('render-tbody');
+  const barChart = document.getElementById('bar-chart');
+
+  // Trigger points (in source-character index) at which a render row appears.
+  // Computed lazily on first run.
+  function findTriggerForRow(name) {
+    let consumed = 0;
+    for (const seg of SOURCE_TOKENS) {
+      if (seg.t.includes(name + ',')) {
+        // appearing trigger: when we finish writing the row's "=SUM(...)" formula
+        // We approximate that by 'after this row's first occurrence + 50 chars'
+        return consumed + 50;
+      }
+      consumed += seg.t.length;
+    }
+    return Infinity;
+  }
+  const TRIGGERS = ROWS.map(r => ({...r, trigger: findTriggerForRow(r.region)}));
+
+  function updateRender(idx) {
+    const visible = TRIGGERS.filter(r => idx >= r.trigger);
+    const existing = tbody.children.length;
+    if (visible.length === existing) return;
+    // Add the next row with flash animation
+    const next = visible[existing];
+    if (!next) return;
+    const tr = document.createElement('tr');
+    tr.className = 'flash';
+    tr.innerHTML = `
+      <td>${next.region}</td>
+      <td>${next.jan}</td>
+      <td>${next.feb}</td>
+      <td>${next.mar}</td>
+      <td class="computed">${next.total}</td>
+    `;
+    tbody.appendChild(tr);
+
+    // Push a bar onto the chart
+    const allTotals = visible.map(v => v.total);
+    const maxT = Math.max(...allTotals, 1);
+    barChart.innerHTML = '';
+    for (const v of visible) {
+      const bar = document.createElement('div');
+      bar.className = 'demo-bar';
+      bar.dataset.label = v.region;
+      bar.dataset.value = v.total;
+      bar.style.height = '0';
+      barChart.appendChild(bar);
+      // animate to height after a tick
+      requestAnimationFrame(() => {
+        bar.style.height = `${(v.total / maxT) * 78}%`;
+      });
+    }
+  }
+
+  function step() {
+    // type 2 chars per frame for a smooth typewriter feel
+    charIdx = Math.min(charIdx + 2, TOTAL);
+    src.innerHTML = renderTyped(charIdx);
+    src.scrollTop = src.scrollHeight;
+    updateRender(charIdx);
+    if (charIdx >= TOTAL) {
+      // After done, restart after a pause
+      setTimeout(() => {
+        charIdx = 0;
+        tbody.innerHTML = '';
+        barChart.innerHTML = '';
+        animate();
+      }, 4500);
+      return;
+    }
+    requestAnimationFrame(step);
+  }
+
+  function animate() {
+    // Only start the typing once visible (saves CPU when scrolled away)
+    if (document.visibilityState !== 'visible') {
+      setTimeout(animate, 800); return;
+    }
+    requestAnimationFrame(step);
+  }
+  // Kick off after a short delay so the page paints first.
+  setTimeout(animate, 400);
+
+  // ─── Live cursor wander ────────────────────────────────────────────
+  const cursor = document.getElementById('cursor');
+  const positions = [
+    {top: 74,  left: 42},
+    {top: 96,  left: 58},
+    {top: 118, left: 36},
+    {top: 70,  left: 28},
+    {top: 220, left: 52},
+    {top: 250, left: 70},
+    {top: 200, left: 22},
+  ];
+  let cIdx = 0;
+  setInterval(() => {
+    cIdx = (cIdx + 1) % positions.length;
+    cursor.style.top = positions[cIdx].top + 'px';
+    cursor.style.left = positions[cIdx].left + '%';
+  }, 1700);
+
+  // Add the blink keyframe (couldn't put it inline because of CSP-ish concerns)
+  const sty = document.createElement('style');
+  sty.textContent = '@keyframes blink { 50% { opacity: 0; } }';
+  document.head.appendChild(sty);
+})();
+</script>
+
 </body>
 </html>
