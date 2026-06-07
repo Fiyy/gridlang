@@ -48,9 +48,12 @@ jobs:
           find _site/gridlang -type d -name '__pycache__' -exec rm -rf {} + || true
           find _site/gridlang -type f -name '*.pyc' -delete || true
 
-          # 3. Copy examples (only .grid; no fixtures since browser can't fetch them anyway).
+          # 3. Copy examples (only the numbered demo files; skip imported_from_excel
+          # which is a transient test artifact).
           mkdir -p _site/examples
-          cp examples/*.grid _site/examples/
+          for f in examples/[0-9]*.grid; do
+            cp "$f" _site/examples/
+          done
 
           # 4. Generate manifest.json listing every .py file the SPA needs to load.
           python3 <<'PY'
