@@ -87,6 +87,7 @@ def import_excel(
     # --- data (per sheet) ---
     all_formulas = {}  # sheet_name → list of formula info
     all_styles = {}    # sheet_name → style info
+    all_summaries = {}  # sheet_name → list of {coord, formula, value}
 
     for sheet_name in target_sheets:
         ws_data = wb_data[sheet_name]
@@ -99,9 +100,12 @@ def import_excel(
             safe_name = _safe_sheet_name(sheet_name)
             parts.append(f"--- data:{safe_name} ---")
 
-        csv_content = _extract_sheet_data(ws_data)
+        csv_content, summary_rows = _extract_sheet_data(ws_data, ws_formula)
         parts.append(csv_content)
         parts.append("")
+
+        if summary_rows:
+            all_summaries[sheet_name] = summary_rows
 
         # Collect formulas
         if ws_formula and include_formulas:
@@ -117,7 +121,7 @@ def import_excel(
 
     # --- compute ---
     parts.append("--- compute ---")
-    compute_code = _generate_compute_section(all_formulas, target_sheets)
+    compute_code = _generate_compute_section(all_formulas, target_sheets, all_summaries)
     parts.append(compute_code)
     parts.append("")
 
@@ -149,13 +153,144 @@ def import_excel_to_file(
 # Data Extraction
 # =============================================================================
 
-def _extract_sheet_data(ws) -> str:
-    """Extract sheet data as CSV string."""
-    rows = []
-    for row in ws.iter_rows(values_only=True):
-        # Skip completely empty rows
-        if all(cell is None for cell in row):
+def _looks_like_header_row(row: tuple) -> bool:
+    """
+    Decide whether a row of cells looks like a column-header row.
+
+    True iff the row has at least one cell AND every non-empty cell is a
+    string that's either:
+      - non-numeric (e.g. "Region", "Q1 Sales", "%-of-total")
+      - or short and obviously a label (no purely-numeric strings either).
+
+    A row of all-numeric values (`1, 1, 1, ...` or `2024, 2025, ...`) is
+    NOT a header — it's data.
+
+    A mixed row ("Region", 100, 200, ...) is NOT a header either, because
+    real headers don't mix labels and numbers in one row.
+    """
+    non_empty = [c for c in row if c is not None and str(c).strip() != ""]
+    if not non_empty:
+        return False  # empty rows are never headers
+
+    for c in non_empty:
+        # Numbers (int, float, bool) → not a header cell.
+        if isinstance(c, (int, float, bool)) and not isinstance(c, str):
+            return False
+        # Strings that parse as numbers → not header cells.
+        if isinstance(c, str):
+            s = c.strip()
+            try:
+                float(s)
+                return False  # purely numeric string
+            except (ValueError, TypeError):
+                pass
+            if s.startswith("="):
+                return False  # formula text — not a header
+        else:
+            # datetime, etc. — not a header
+            return False
+    return True
+
+
+def _is_summary_row(row: tuple, formula_row: Optional[tuple] = None) -> bool:
+    """
+    Decide whether a row looks like a single-cell summary row at the bottom
+    of a data block (e.g. just `=SUM(A1:I26)` in column A, rest empty).
+
+    Heuristic: at most one non-empty cell, AND either that cell is a formula
+    in `formula_row`, or the cached value in `row` is a number while every
+    other cell is empty.
+    """
+    non_empty_idx = [i for i, c in enumerate(row) if c is not None and str(c).strip() != ""]
+    if len(non_empty_idx) > 1:
+        return False  # multiple values → looks like real data
+    if not non_empty_idx:
+        return False  # empty row, caller filters those separately
+    # Exactly one value. If we have the formula-mode row, check it's a formula.
+    if formula_row is not None:
+        f = formula_row[non_empty_idx[0]]
+        if isinstance(f, str) and f.startswith("="):
+            return True
+        # ArrayFormula objects also count as formulas.
+        if f is not None and not isinstance(f, (int, float, bool, str)):
+            return True
+    return False
+
+
+def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict]]:
+    """Extract sheet data as CSV string. Returns (csv, summary_rows).
+
+    `summary_rows` is a list of {'coord', 'formula', 'value'} dicts for any
+    formula-only trailing rows that were filtered out of the data CSV.
+    """
+    # Collect all rows up front so we can decide:
+    #   1) whether row 1 is a header
+    #   2) whether trailing rows are summary-only
+    raw_rows = list(ws.iter_rows(values_only=True))
+    formula_rows = (
+        list(ws_formula.iter_rows(values_only=True))
+        if ws_formula is not None
+        else [None] * len(raw_rows)
+    )
+
+    # ── 1. Drop trailing summary-only rows (e.g. `=SUM(A1:I26)` in col A).
+    summary_rows = []
+    end = len(raw_rows)
+    while end > 0:
+        # Skip blank rows from the bottom.
+        cur = raw_rows[end - 1]
+        if all(c is None or str(c).strip() == "" for c in cur):
+            end -= 1
             continue
+        # Is this a single-cell summary row?
+        f_row = formula_rows[end - 1] if end - 1 < len(formula_rows) else None
+        if _is_summary_row(cur, f_row):
+            non_empty_idx = [i for i, c in enumerate(cur) if c is not None and str(c).strip() != ""]
+            i = non_empty_idx[0]
+            coord = f"{get_column_letter(i + 1)}{end}"
+            f_val = f_row[i] if f_row is not None else None
+            # Normalize ArrayFormula → its formula text.
+            if hasattr(f_val, "text"):
+                f_text = f_val.text
+            elif isinstance(f_val, str) and f_val.startswith("="):
+                f_text = f_val
+            else:
+                f_text = None
+            summary_rows.append({
+                "coord": coord,
+                "formula": f_text,
+                "value": cur[i],
+            })
+            end -= 1
+            continue
+        break  # found a real data row, stop trimming
+
+    summary_rows.reverse()  # restore top-to-bottom order
+
+    # ── 2. Drop trailing blank rows that came BEFORE the now-last data row,
+    #       AND any rows we already trimmed.
+    rows_in = raw_rows[:end]
+    # Filter blank rows everywhere (preserves prior behaviour for the body).
+    body_rows = [r for r in rows_in if not all(c is None for c in r)]
+
+    if not body_rows:
+        return "", summary_rows
+
+    # ── 3. Decide whether row 1 is a header or data.
+    has_header = _looks_like_header_row(body_rows[0])
+    if has_header:
+        header_row = body_rows[0]
+        data_rows = body_rows[1:]
+        headers = [_clean_column_name(str(c) if c is not None else "") for c in header_row]
+    else:
+        # Synthesize col_A, col_B, ... headers from column count.
+        n_cols = max(len(r) for r in body_rows)
+        headers = [f"col_{get_column_letter(i + 1)}" for i in range(n_cols)]
+        data_rows = body_rows
+
+    # ── 4. Serialize.
+    csv_lines = [",".join(headers)]
+    for row in data_rows:
         csv_row = []
         for cell in row:
             if cell is None:
@@ -166,22 +301,12 @@ def _extract_sheet_data(ws) -> str:
                 csv_row.append(str(int(cell)))
             else:
                 val = str(cell)
-                # Quote if contains comma or quotes
-                if ',' in val or '"' in val or '\n' in val:
+                if "," in val or '"' in val or "\n" in val:
                     val = '"' + val.replace('"', '""') + '"'
                 csv_row.append(val)
-        rows.append(','.join(csv_row))
+        csv_lines.append(",".join(csv_row))
 
-    if not rows:
-        return ""
-
-    # Clean column headers (make valid Python identifiers)
-    if rows:
-        headers = rows[0].split(',')
-        clean_headers = [_clean_column_name(h) for h in headers]
-        rows[0] = ','.join(clean_headers)
-
-    return '\n'.join(rows)
+    return "\n".join(csv_lines), summary_rows
 
 
 def _clean_column_name(name: str) -> str:
@@ -219,18 +344,35 @@ FORMULA_PATTERNS = [
 
 
 def _extract_formulas(ws) -> list[dict]:
-    """Extract formulas from worksheet."""
+    """Extract formulas from worksheet.
+
+    Handles both plain `=SUM(...)` strings and openpyxl ArrayFormula
+    objects (dynamic-array formulas). The latter would otherwise be
+    silently dropped because their `.value` is not a string.
+    """
     formulas = []
     for row in ws.iter_rows():
         for cell in row:
-            if cell.value and isinstance(cell.value, str) and cell.value.startswith('='):
-                formulas.append({
-                    'cell': cell.coordinate,
-                    'column': get_column_letter(cell.column),
-                    'col_idx': cell.column - 1,
-                    'row': cell.row,
-                    'formula': cell.value,
-                })
+            v = cell.value
+            if v is None:
+                continue
+            # Plain text formula.
+            if isinstance(v, str) and v.startswith('='):
+                formula_text = v
+            # openpyxl ArrayFormula object — has a .text attribute.
+            elif hasattr(v, 'text') and isinstance(getattr(v, 'text', None), str):
+                formula_text = v.text
+                if not formula_text.startswith('='):
+                    formula_text = '=' + formula_text
+            else:
+                continue
+            formulas.append({
+                'cell': cell.coordinate,
+                'column': get_column_letter(cell.column),
+                'col_idx': cell.column - 1,
+                'row': cell.row,
+                'formula': formula_text,
+            })
     return formulas
 
 
@@ -470,36 +612,62 @@ def _convert_range_to_col(range_str: str, headers: list[str] = None) -> str:
     return range_str
 
 
-def _generate_compute_section(all_formulas: dict, sheet_names: list[str]) -> str:
+def _generate_compute_section(
+    all_formulas: dict,
+    sheet_names: list[str],
+    all_summaries: Optional[dict] = None,
+) -> str:
     """Generate compute section from extracted formulas."""
     lines = []
     lines.append("def transform(df):")
 
     has_formulas = any(formulas for formulas in all_formulas.values())
+    has_summaries = bool(all_summaries) and any(s for s in (all_summaries or {}).values())
 
-    if has_formulas:
+    if has_formulas or has_summaries:
         lines.append("    # Auto-converted from Excel formulas")
         lines.append("    # Review and adjust as needed")
         lines.append("")
 
-        for sheet_name, formulas in all_formulas.items():
-            if len(all_formulas) > 1:
-                lines.append(f"    # --- Sheet: {sheet_name} ---")
+        # Summaries (trailing single-cell formula rows) come first as a clearly
+        # labelled block, since they were extracted out of the data table.
+        if has_summaries:
+            for sheet_name, summaries in all_summaries.items():
+                if not summaries:
+                    continue
+                if len(all_summaries) > 1:
+                    lines.append(f"    # --- Summary cells for sheet: {sheet_name} ---")
+                else:
+                    lines.append("    # --- Summary cells (trailing rows below data) ---")
+                for s in summaries:
+                    coord = s.get("coord", "?")
+                    formula = s.get("formula") or "(array formula)"
+                    value = s.get("value")
+                    py_hint = _convert_formula_to_python(formula) if formula else ""
+                    lines.append(f"    # Cell {coord}: {formula}  (cached value: {value})")
+                    if py_hint and not py_hint.startswith("#"):
+                        lines.append(f"    # → {py_hint}")
+                lines.append("")
 
-            # Group formulas by type
-            seen_patterns = set()
-            for f_info in formulas:
-                python_code = _convert_formula_to_python(f_info['formula'])
-                # Avoid duplicates (same formula applied to many rows)
-                pattern_key = re.sub(r'\d+', 'N', f_info['formula'])
-                if pattern_key not in seen_patterns:
-                    seen_patterns.add(pattern_key)
-                    if python_code.startswith('#'):
-                        lines.append(f"    {python_code}")
-                    else:
-                        lines.append(f"    # Cell {f_info['cell']}: {f_info['formula']}")
-                        lines.append(f"    # → {python_code}")
-        lines.append("")
+        if has_formulas:
+            for sheet_name, formulas in all_formulas.items():
+                if len(all_formulas) > 1:
+                    lines.append(f"    # --- Sheet: {sheet_name} ---")
+
+                # Group formulas by type
+                seen_patterns = set()
+                for f_info in formulas:
+                    python_code = _convert_formula_to_python(f_info['formula'])
+                    # Avoid duplicates (same formula applied to many rows)
+                    pattern_key = re.sub(r'\d+', 'N', f_info['formula'])
+                    if pattern_key not in seen_patterns:
+                        seen_patterns.add(pattern_key)
+                        if python_code.startswith('#'):
+                            lines.append(f"    {python_code}")
+                        else:
+                            lines.append(f"    # Cell {f_info['cell']}: {f_info['formula']}")
+                            lines.append(f"    # → {python_code}")
+            lines.append("")
     else:
         lines.append("    # No formulas detected — add your transformations here")
         lines.append("    pass")

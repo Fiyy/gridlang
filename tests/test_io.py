@@ -134,6 +134,115 @@ class TestExcelImport:
         with pytest.raises(FileNotFoundError):
             import_excel("/nonexistent/file.xlsx")
 
+    # ──────────────────────────────────────────────────────────────────
+    # Regressions for the "测试1.xlsx"-class of import bugs:
+    # numeric-only first row, gap rows, and trailing summary rows.
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_no_header_row_detected_when_all_numeric(self, tmp_path):
+        """Row 1 = all numbers → don't promote it to header.
+
+        Before this fix, a pure-data sheet `1,1,...` / `2,2,...` would have
+        row 1 silently consumed as a header, dropping a real data row.
+        """
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        for v in range(1, 6):  # 5 rows of all-numeric data
+            ws.append([v] * 4)
+        f = tmp_path / "no_header.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.parser import parse_string
+        from gridlang.schema import parse_data
+        df = parse_data(parse_string(result).data_raw)
+
+        # All 5 source rows must survive — none consumed as header.
+        assert len(df) == 5
+        # Synthetic headers must be col_A..col_D, not "1, 1.1, ...".
+        assert list(df.columns) == ["col_A", "col_B", "col_C", "col_D"]
+        # First row's values are 1, last row's values are 5.
+        assert int(df.iloc[0, 0]) == 1
+        assert int(df.iloc[-1, 0]) == 5
+
+    def test_header_row_detected_when_text(self, tmp_path):
+        """Row 1 = text labels → DO use it as header (existing behaviour)."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Region", "Q1", "Q2"])
+        ws.append(["North", 100, 200])
+        ws.append(["South", 150, 250])
+        f = tmp_path / "with_header.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.parser import parse_string
+        from gridlang.schema import parse_data
+        df = parse_data(parse_string(result).data_raw)
+
+        assert list(df.columns) == ["Region", "Q1", "Q2"]
+        assert len(df) == 2
+        assert df.iloc[0]["Region"] == "North"
+
+    def test_trailing_summary_row_separated(self, tmp_path):
+        """Trailing `=SUM(...)` row goes into compute, not data."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Name", "Score"])
+        ws.append(["Alice", 90])
+        ws.append(["Bob", 80])
+        ws.append(["Carol", 70])
+        # Trailing summary row in column B, rest empty.
+        ws["A5"] = None
+        ws["B5"] = "=SUM(B2:B4)"
+        f = tmp_path / "with_summary.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+
+        # Data section must NOT contain the SUM formula or its placeholder.
+        # Pull just the data block to be specific.
+        from gridlang.parser import parse_string
+        doc = parse_string(result)
+        assert "=SUM" not in doc.data_raw
+        # The compute section should mention it explicitly.
+        assert "=SUM(B2:B4)" in doc.compute_raw or "Summary cells" in doc.compute_raw
+
+        # And the data rows survive intact.
+        from gridlang.schema import parse_data
+        df = parse_data(doc.data_raw)
+        assert len(df) == 3
+        assert set(df["Name"]) == {"Alice", "Bob", "Carol"}
+
+    def test_array_formula_not_dropped(self, tmp_path):
+        """ArrayFormula objects (dynamic arrays) get extracted, not silently dropped."""
+        from openpyxl import Workbook
+        from openpyxl.worksheet.formula import ArrayFormula
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Name", "Score"])
+        ws.append(["Alice", 90])
+        ws.append(["Bob", 80])
+        # Park an array formula at C1:C2.
+        ws["C1"] = ArrayFormula("C1:C2", "=B1:B2*2")
+        f = tmp_path / "array_formula.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+
+        # Array formula's text should land somewhere in the compute section.
+        # (Exact rendering varies by openpyxl version; just look for the body.)
+        from gridlang.parser import parse_string
+        doc = parse_string(result)
+        compute = doc.compute_raw
+        assert "B1:B2" in compute or "C1:C2" in compute, (
+            "Array formula text was silently dropped: " + compute[:300]
+        )
+
 
 class TestExcelExport:
     def test_basic_export(self, sample_grid, tmp_path):
