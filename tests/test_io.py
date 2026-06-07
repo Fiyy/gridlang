@@ -652,10 +652,19 @@ class TestExcelImport:
         )
         import re
         body = re.search(r"<tbody>(.*?)</tbody>", html, re.S).group(1)
-        # Faithful: 11 rows in, 11 rows out.
+        # Faithful: every data row must appear in the rendered body, with
+        # extra padding rows past the data (Excel-style canvas).
         rendered_rows = re.findall(r"<tr>.*?</tr>", body, re.S)
-        assert len(rendered_rows) == 11, (
-            f"Expected 11 <tr> rows (10 dense + 1 sparse), got {len(rendered_rows)}"
+        # A "data row" is one that contains at least one `<td class="gl-cell">`
+        # WITHOUT `gl-pad` — i.e. a real or empty user cell, not canvas.
+        def _is_data_row(row_html):
+            # Match cells with class="gl-cell" or "gl-cell gl-empty" or
+            # "gl-cell gl-text" — but NOT "gl-cell gl-pad".
+            return bool(re.search(r'class="gl-cell(?! gl-pad)(?:[^"]*)"', row_html))
+        data_rows = [r for r in rendered_rows if _is_data_row(r)]
+        assert len(data_rows) == 11, (
+            f"Expected 11 data <tr> rows (10 dense + 1 sparse), "
+            f"got {len(data_rows)}"
         )
         # No "1.0", "5.0", "99.0" should appear.
         for n in (1, 5, 10, 99):
@@ -745,21 +754,71 @@ class TestExcelImport:
         # Row numbers in <tbody>.
         body = re.search(r"<tbody>(.*?)</tbody>", html, re.S).group(1)
         rows = re.findall(r"<tr>.*?</tr>", body, re.S)
-        # 6 rows: rows 1-3 (data), 4 (blank — nothing was written there),
-        # 5 (blank), 6 (sparse: A6=99).
-        # Note: openpyxl does write row 4 even though we appended 3 rows,
-        # because ws["A6"] forces the worksheet to extend. Either way we
-        # expect EVERY row from 1 through the last non-empty row.
-        assert len(rows) >= 4, f"Expected at least 4 rendered rows, got {len(rows)}"
-        for i in range(1, len(rows) + 1):
+        # Excel-style padding means there are MANY rows (≥ 50). Slice out
+        # the data rows for the actual checks.
+        assert len(rows) >= 50, f"Expected ≥ 50 rendered rows, got {len(rows)}"
+        # Row-number column shows 1, 2, 3, ... — verify a handful.
+        for i in (1, 2, 3, len(rows)):
             assert f'class="gl-rownum">{i}</td>' in rows[i - 1], f"Missing row number {i}"
 
-        # Some row in the middle is blank — must show visible empty cells.
-        any_blank = any("gl-empty" in r for r in rows[3:])
+        # Data rows: at least one non-padding cell.
+        def _is_data_row(r):
+            return bool(re.search(r'class="gl-cell(?! gl-pad)(?:[^"]*)"', r))
+        data_rows = [r for r in rows if _is_data_row(r)]
+        assert len(data_rows) >= 4, f"Expected ≥ 4 data rows, got {len(data_rows)}"
+
+        # Some data row in the middle is blank — must show visible empty cells.
+        any_blank = any("gl-empty" in r for r in data_rows[3:])
         assert any_blank, "No blank row had visible empty cells"
-        # The last row has 99 in column A.
-        assert ">99<" in rows[-1]
-        assert rows[-1].count("gl-empty") == 3
+        # The last data row has 99 in column A.
+        last_data_row = data_rows[-1]
+        assert ">99<" in last_data_row, "99 not found in last data row"
+
+    def test_excel_canvas_padding_present(self, tmp_path):
+        """Excel always shows extra empty rows/columns beyond your data
+        (the spreadsheet canvas). Our render must mimic that — at least
+        50 rows and 26 (A-Z) columns visible, even for a tiny sheet."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        # A tiny 2-cell sheet — most of the rendered grid will be canvas.
+        ws.append([42, 99])
+        f = tmp_path / "tiny.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        from gridlang.runtime import execute
+        from gridlang.renderer import render
+        doc = parse_string(result)
+        df = parse_data(doc.data_raw)
+        out = execute(doc.compute_raw, df)
+        html = render(
+            template_content=doc.present_raw, df=out.df,
+            aggregates=out.aggregates, meta=doc.meta,
+        )
+
+        import re
+        thead = re.search(r"<thead>(.*?)</thead>", html, re.S).group(1)
+        # At least A through Z appear (columns A-Z = 26 letters).
+        for letter in ["A", "G", "M", "S", "Z"]:
+            assert f">{letter}</th>" in thead, f"Canvas column letter {letter} missing"
+
+        body = re.search(r"<tbody>(.*?)</tbody>", html, re.S).group(1)
+        rows = re.findall(r"<tr>.*?</tr>", body, re.S)
+        assert len(rows) >= 50, (
+            f"Expected ≥ 50 rows in canvas, got {len(rows)} — "
+            "Excel-style padding missing"
+        )
+        # Last row's row-number must be 50 or higher.
+        assert 'class="gl-rownum">50</td>' in rows[49]
+        # Padding rows must be marked so CSS can style them.
+        assert "gl-pad" in body, "Padding rows have no `gl-pad` class"
+        # First data row has 42 in column A and 99 in column B.
+        first_row = rows[0]
+        assert ">42<" in first_row
+        assert ">99<" in first_row
+
 
     def test_测试1_xlsx_cell_parity(self, tmp_path):
         """The exact `测试1.xlsx` the user reported MUST round-trip every

@@ -901,6 +901,11 @@ def _generate_present_section(all_styles: dict, sheet_names: list[str]) -> str:
     lines.append('  }')
     lines.append('  .gl-sheet tbody td.gl-cell.gl-text { text-align: left; }')
     lines.append('  .gl-sheet tbody td.gl-cell.gl-empty { background: #fdfdfd; }')
+    lines.append('  /* Padding cells beyond user data — Excel-style empty canvas */')
+    lines.append('  .gl-sheet tbody td.gl-pad { background: #fcfcfd; }')
+    lines.append('  .gl-sheet thead th.gl-pad-col {')
+    lines.append('    background: #f6f7f8; color: #6b7280; font-weight: 400;')
+    lines.append('  }')
     lines.append('  .gl-sheet tbody tr:hover td.gl-cell { background: #fff8c4; }')
     lines.append('  .gl-sheet tbody tr:hover td.gl-rownum { background: #e8edf2; }')
     lines.append('  .gl-meta { color: #6b7280; font-size: 12px; margin: 4px 0 8px; }')
@@ -927,26 +932,45 @@ def _generate_present_section(all_styles: dict, sheet_names: list[str]) -> str:
     letters_list = [get_column_letter(i + 1) for i in range(702)]
     letters_literal = "[" + ", ".join(repr(l) for l in letters_list) + "]"
 
+    # Excel always shows you the spreadsheet "canvas" — rows and columns
+    # beyond the user's data — so the user can extend their sheet. We
+    # mimic that: render at least MIN_ROWS rows and at least MIN_COLS
+    # columns, padding with empty cells past the data.
     lines.append('{% set _letters = ' + letters_literal + ' %}')
+    lines.append('{% set _min_rows = 50 %}')      # always show ≥ 50 rows
+    lines.append('{% set _min_cols = 26 %}')      # always show ≥ A..Z
+    lines.append('{% set _pad_rows = 8 %}')       # plus a few empty rows past the data
+    lines.append('{% set _pad_cols = 4 %}')       # plus a few empty cols past the data
+    lines.append('{% set _data_rows = df.shape[0] %}')
+    lines.append('{% set _data_cols = df.shape[1] %}')
+    lines.append('{% set _total_rows = [_data_rows + _pad_rows, _min_rows] | max %}')
+    lines.append('{% set _total_cols = [_data_cols + _pad_cols, _min_cols] | max %}')
+
     lines.append('<div class="gl-sheet-wrap">')
     lines.append('<table class="gl-sheet">')
     lines.append('  <thead>')
     lines.append('    <tr>')
     lines.append('      <th class="gl-rownum gl-corner"></th>')
-    lines.append('      {% for col in df.columns %}')
-    lines.append('        <th title="{{ col }}">{{ _letters[loop.index0] }}</th>')
+    # Column-letter header row — extends past data columns into the canvas.
+    lines.append('      {% for ci in range(_total_cols) %}')
+    lines.append('        {% if ci < _data_cols %}')
+    lines.append('          <th title="{{ df.columns[ci] }}">{{ _letters[ci] }}</th>')
+    lines.append('        {% else %}')
+    lines.append('          <th class="gl-pad-col">{{ _letters[ci] }}</th>')
+    lines.append('        {% endif %}')
     lines.append('      {% endfor %}')
     lines.append('    </tr>')
     lines.append('  </thead>')
     lines.append('  <tbody>')
-    lines.append('    {% for _, row in df.iterrows() %}')
+    lines.append('    {% for ri in range(_total_rows) %}')
     lines.append('    <tr>')
-    lines.append('      <td class="gl-rownum">{{ loop.index }}</td>')
-    lines.append('      {% for col in df.columns %}')
-    lines.append('      {% set v = row[col] %}')
-    # NaN/None → empty visible cell. Whole-number floats → int. Numbers
-    # right-aligned, text left-aligned.
-    lines.append('      {% if v is none or (v is number and v != v) %}'
+    lines.append('      <td class="gl-rownum">{{ ri + 1 }}</td>')
+    lines.append('      {% if ri < _data_rows %}')
+    lines.append('        {% set row = df.iloc[ri] %}')
+    lines.append('        {% for ci in range(_total_cols) %}')
+    lines.append('          {% if ci < _data_cols %}')
+    lines.append('            {% set v = row[df.columns[ci]] %}')
+    lines.append('            {% if v is none or (v is number and v != v) %}'
                  '<td class="gl-cell gl-empty">&nbsp;</td>'
                  '{% elif v is number and (v | int) == v %}'
                  '<td class="gl-cell">{{ v | int }}</td>'
@@ -955,7 +979,16 @@ def _generate_present_section(all_styles: dict, sheet_names: list[str]) -> str:
                  '{% else %}'
                  '<td class="gl-cell gl-text">{{ v }}</td>'
                  '{% endif %}')
-    lines.append('      {% endfor %}')
+    lines.append('          {% else %}')
+    lines.append('            <td class="gl-cell gl-pad">&nbsp;</td>')
+    lines.append('          {% endif %}')
+    lines.append('        {% endfor %}')
+    lines.append('      {% else %}')
+    # Padding rows past data — every cell empty.
+    lines.append('        {% for ci in range(_total_cols) %}'
+                 '<td class="gl-cell gl-pad">&nbsp;</td>'
+                 '{% endfor %}')
+    lines.append('      {% endif %}')
     lines.append('    </tr>')
     lines.append('    {% endfor %}')
     lines.append('  </tbody>')
