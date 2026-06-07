@@ -223,20 +223,21 @@ def _is_summary_row(row: tuple, formula_row: Optional[tuple] = None) -> bool:
 
 
 def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict], list[dict]]:
-    """Extract sheet data as CSV string.
+    """Extract sheet data as a CSV string that **faithfully preserves**
+    every cell the user typed.
 
-    Returns ``(csv, summary_rows, extra_cells)``:
+    Design principle: never silently drop a value. The user's source of
+    truth is the spreadsheet; the imported `.grid` must contain the same
+    cells. Subsequent layers (compute / present) are advisory.
 
-      * ``summary_rows`` — trailing single-cell formula rows (e.g.
-        ``=SUM(A1:I26)`` in A27) pulled out of the data block.
-      * ``extra_cells`` — sparse rows that are *detached* from the main
-        data block by a blank-row gap and have far lower fill density.
-        They are kept for documentation in the compute section but
-        removed from the data CSV so they don't pollute dtypes / layout.
+    Returns ``(csv, summary_rows, extra_cells)``. `summary_rows` is kept
+    only as a *non-destructive* annotation: we still write the cached
+    value of trailing single-cell formula rows into the CSV, but ALSO
+    surface the formula text in compute as a hint. `extra_cells` is
+    always returned as ``[]`` — kept in the signature for back-compat
+    with callers; we no longer remove "detached" rows from data.
     """
-    # Collect all rows up front so we can decide:
-    #   1) whether row 1 is a header
-    #   2) whether trailing rows are summary-only
+    # ── 0. Snapshot every row exactly as openpyxl sees it.
     raw_rows = list(ws.iter_rows(values_only=True))
     formula_rows = (
         list(ws_formula.iter_rows(values_only=True))
@@ -244,25 +245,53 @@ def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict], list[dict
         else [None] * len(raw_rows)
     )
 
-    # ── 1. Drop trailing summary-only rows (e.g. `=SUM(A1:I26)` in col A).
-    summary_rows = []
+    if not raw_rows:
+        return "", [], []
+
+    # Determine the rectangle: trim trailing fully-blank rows but keep
+    # blanks INSIDE the data block (they're meaningful in spreadsheets).
+    # IMPORTANT: a row that's empty in data_only=True view but contains a
+    # formula in data_only=False view is NOT blank — it has a real cell
+    # whose cached value just hasn't been computed yet.
+    def _row_is_blank(row, f_row):
+        if row is not None and any(c is not None and str(c).strip() != "" for c in row):
+            return False
+        if f_row is not None and any(c is not None and str(c).strip() != "" for c in f_row):
+            return False
+        return True
+
     end = len(raw_rows)
     while end > 0:
-        # Skip blank rows from the bottom.
-        cur = raw_rows[end - 1]
-        if all(c is None or str(c).strip() == "" for c in cur):
-            end -= 1
-            continue
-        # Is this a single-cell summary row?
         f_row = formula_rows[end - 1] if end - 1 < len(formula_rows) else None
+        if _row_is_blank(raw_rows[end - 1], f_row):
+            end -= 1
+        else:
+            break
+    if end == 0:
+        return "", [], []
+
+    body_rows = raw_rows[:end]
+    formula_body = formula_rows[:end] if formula_rows else [None] * end
+
+    # ── 1. Note (don't drop) any trailing single-cell formula rows.
+    # We emit the cached value into the CSV like every other cell; the
+    # formula text still gets surfaced in the compute hints.
+    summary_rows = []
+    for i in range(len(body_rows)):
+        cur = body_rows[i]
+        f_row = formula_body[i] if i < len(formula_body) else None
         if _is_summary_row(cur, f_row):
-            non_empty_idx = [i for i, c in enumerate(cur) if c is not None and str(c).strip() != ""]
-            i = non_empty_idx[0]
-            coord = f"{get_column_letter(i + 1)}{end}"
-            f_val = f_row[i] if f_row is not None else None
-            # Normalize ArrayFormula → its formula text.
+            non_empty_idx = [j for j, c in enumerate(cur)
+                             if c is not None and str(c).strip() != ""]
+            if not non_empty_idx:
+                continue
+            j = non_empty_idx[0]
+            coord = f"{get_column_letter(j + 1)}{i + 1}"
+            f_val = f_row[j] if f_row is not None else None
             if hasattr(f_val, "text"):
                 f_text = f_val.text
+                if not (isinstance(f_text, str) and f_text.startswith("=")):
+                    f_text = "=" + (f_text or "")
             elif isinstance(f_val, str) and f_val.startswith("="):
                 f_text = f_val
             else:
@@ -270,101 +299,31 @@ def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict], list[dict
             summary_rows.append({
                 "coord": coord,
                 "formula": f_text,
-                "value": cur[i],
+                "value": cur[j],
             })
-            end -= 1
-            continue
-        break  # found a real data row, stop trimming
 
-    summary_rows.reverse()  # restore top-to-bottom order
-
-    # ── 2. Look at remaining rows. Keep their 1-based row numbers so we
-    #       can detect "detached" sparse rows separated by a blank gap.
-    rows_in = [(r_idx + 1, raw_rows[r_idx]) for r_idx in range(end)]
-    # Drop fully-blank rows up front; we record gaps via row numbers.
-    body = [(rn, r) for rn, r in rows_in
-            if not all(c is None or str(c).strip() == "" for c in r)]
-
-    if not body:
+    # ── 2. Compute the column count from the maximum-width row.
+    n_cols = max((len(r) for r in body_rows), default=0)
+    if n_cols == 0:
         return "", summary_rows, []
 
-    n_cols = max(len(r) for _, r in body)
+    # Pad every row to n_cols so the CSV is rectangular.
+    padded = [r + (None,) * (n_cols - len(r)) for r in body_rows]
 
-    def _density(row):
-        non_empty = sum(1 for c in row if c is not None and str(c).strip() != "")
-        return non_empty / n_cols if n_cols else 0.0
-
-    # ── 3. Find the main data block: the longest run of rows whose
-    #       row numbers are consecutive AND density is roughly uniform.
-    #       Anything detached from it by a blank-row gap with much lower
-    #       density is treated as a stray "extra" cell-set.
-    runs = []  # list[list[int]] of indexes into `body`
-    cur_run = [0]
-    for i in range(1, len(body)):
-        prev_rn, prev = body[i - 1]
-        cur_rn, cur = body[i]
-        if cur_rn == prev_rn + 1:  # consecutive
-            cur_run.append(i)
-        else:
-            runs.append(cur_run)
-            cur_run = [i]
-    runs.append(cur_run)
-
-    # Pick the "main" run = the one whose total fill (sum of densities)
-    # is largest. That's robust against a single dense outlier row.
-    main_run_idx = max(range(len(runs)),
-                       key=lambda k: sum(_density(body[i][1]) for i in runs[k]))
-    main_run = set(runs[main_run_idx])
-    # Lowest density in the main run is our floor — anything in a *separate*
-    # run that's well below that floor is treated as a detached stray.
-    main_run_densities = [_density(body[i][1]) for i in runs[main_run_idx]]
-    main_floor = min(main_run_densities) if main_run_densities else 1.0
-
-    # ── 4. Walk body rows, separating main-block rows from detached extras.
-    keep_rows = []          # list[(row_num, row_tuple)] for the data CSV
-    extra_cells = []        # list[{'coord','value'}] for the compute annex
-    for run_idx, run in enumerate(runs):
-        if run_idx == main_run_idx:
-            for i in run:
-                keep_rows.append(body[i])
-            continue
-        # A run is "detached and noisy" when its mean density is well
-        # below the sparsest main-block row — concretely, < 2/3 of the
-        # main floor. Otherwise we keep it (e.g. user just had a blank
-        # separator row above genuine data).
-        run_density = sum(_density(body[i][1]) for i in run) / len(run)
-        if run_density < (2.0 / 3.0) * main_floor:
-            for i in run:
-                rn, row = body[i]
-                for col_idx, val in enumerate(row):
-                    if val is None or str(val).strip() == "":
-                        continue
-                    coord = f"{get_column_letter(col_idx + 1)}{rn}"
-                    extra_cells.append({"coord": coord, "value": val})
-        else:
-            for i in run:
-                keep_rows.append(body[i])
-
-    if not keep_rows:
-        # Edge case: nothing made it past the filter — fall back to body.
-        keep_rows = body
-        extra_cells = []
-
-    # ── 5. Decide whether row 1 of keep_rows is a header or data.
-    first_row = keep_rows[0][1]
-    has_header = _looks_like_header_row(first_row)
+    # ── 3. Detect whether row 1 is a textual header.
+    has_header = _looks_like_header_row(padded[0])
     if has_header:
-        header_row = first_row
-        data_rows = [r for _, r in keep_rows[1:]]
-        headers = [_clean_column_name(str(c) if c is not None else "") for c in header_row]
+        header_row = padded[0]
+        data_rows = padded[1:]
+        headers = [_clean_column_name(str(c) if c is not None else "")
+                   for c in header_row]
     else:
-        # Synthesize col_A, col_B, ... headers from column count.
         headers = [f"col_{get_column_letter(i + 1)}" for i in range(n_cols)]
-        data_rows = [r for _, r in keep_rows]
+        data_rows = padded
 
-    # ── 6. Detect per-column integer-ness so we don't have to write
-    #       `1.0`. We scan all kept data rows and emit ints when the
-    #       column's values are exclusively whole numbers (or empty).
+    # ── 4. Per-column integer detection so whole numbers serialize as
+    # `5` instead of `5.0`. Only fires if the WHOLE column is whole-
+    # numbered (or empty).
     col_is_int = []
     for col in range(n_cols):
         all_int = True
@@ -375,36 +334,61 @@ def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict], list[dict
                 continue
             seen_any = True
             if isinstance(v, bool):
-                # bools shouldn't drive int-ness either way
                 all_int = False; break
             if isinstance(v, int):
                 continue
             if isinstance(v, float):
-                if v != v:  # NaN
+                if v != v:    # NaN counts as empty
                     continue
                 if v == int(v):
                     continue
                 all_int = False; break
-            # any non-numeric breaks the int run
             all_int = False; break
         col_is_int.append(seen_any and all_int)
 
-    # ── 7. Serialize.
+    # ── 5. Serialize. Every row is preserved.
+    # If a cell is empty in the data-only view but has a formula in the
+    # formula view, fall back to the formula text — that's still real
+    # cell content (just an uncomputed result), not a blank.
+    # We track formula-rows aligned to data_rows for this purpose.
+    if has_header:
+        formula_data_rows = formula_body[1:] if formula_body else [None] * len(data_rows)
+    else:
+        formula_data_rows = formula_body if formula_body else [None] * len(data_rows)
+    # Pad formula rows to n_cols too.
+    formula_data_rows = [
+        (r + (None,) * (n_cols - len(r))) if r is not None
+        else tuple([None] * n_cols)
+        for r in formula_data_rows
+    ]
+
     csv_lines = [",".join(headers)]
-    for row in data_rows:
+    for row_idx, row in enumerate(data_rows):
+        f_row = formula_data_rows[row_idx] if row_idx < len(formula_data_rows) else None
         csv_row = []
         for col_idx, cell in enumerate(row):
+            f_cell = f_row[col_idx] if f_row is not None and col_idx < len(f_row) else None
+            # Fall back to formula text when the data view is empty but
+            # there's a formula in this position.
+            if (cell is None or (isinstance(cell, str) and cell == "")) and f_cell is not None:
+                if hasattr(f_cell, "text") and isinstance(f_cell.text, str):
+                    cell = f_cell.text if f_cell.text.startswith("=") else "=" + f_cell.text
+                elif isinstance(f_cell, str) and f_cell.startswith("="):
+                    cell = f_cell
+                # else: leave cell as None
+
             if cell is None:
                 csv_row.append("")
             elif isinstance(cell, datetime):
                 csv_row.append(cell.strftime("%Y-%m-%d"))
             elif col_idx < len(col_is_int) and col_is_int[col_idx] and isinstance(cell, (int, float)):
-                # Whole number in an integer column → emit as int.
                 if isinstance(cell, float) and cell != cell:  # NaN
                     csv_row.append("")
+                elif isinstance(cell, bool):
+                    csv_row.append(str(cell))
                 else:
                     csv_row.append(str(int(cell)))
-            elif isinstance(cell, float) and cell == int(cell):
+            elif isinstance(cell, float) and not (cell != cell) and cell == int(cell):
                 csv_row.append(str(int(cell)))
             else:
                 val = str(cell)
@@ -413,7 +397,9 @@ def _extract_sheet_data(ws, ws_formula=None) -> tuple[str, list[dict], list[dict
                 csv_row.append(val)
         csv_lines.append(",".join(csv_row))
 
-    return "\n".join(csv_lines), summary_rows, extra_cells
+    # extra_cells is intentionally always [] — we keep the parameter for
+    # caller compatibility but no longer remove rows from the data block.
+    return "\n".join(csv_lines), summary_rows, []
 
 
 def _clean_column_name(name: str) -> str:
@@ -870,27 +856,59 @@ def _extract_styles(ws) -> dict:
 
 
 def _generate_present_section(all_styles: dict, sheet_names: list[str]) -> str:
-    """Generate present section from extracted styles."""
+    """Generate an Excel-style spreadsheet view as the present section.
+
+    The view shows the FULL data block — every row, every column — with
+    Excel-style column letters (A, B, C, ...) and row numbers as
+    headers. Empty cells render as visible blanks. Integer values stay
+    integer (no `1.0` promotion artifacts).
+    """
     lines = []
 
-    # Generate style block
-    has_special_styles = any(
-        s.get('has_colors') or s.get('conditional_formats')
-        for s in all_styles.values()
-    )
-
     lines.append('<style>')
-    lines.append('  .imported-table { width: 100%; border-collapse: collapse; }')
-    lines.append('  .imported-table th { background: #1e40af; color: white; padding: 0.6rem; '
-                 'text-align: left; font-weight: 600; }')
-    lines.append('  .imported-table td { padding: 0.5rem; border-bottom: 1px solid #e5e7eb; }')
-    lines.append('  .imported-table tr:nth-child(even) { background: #f9fafb; }')
-    lines.append('  .imported-table tr:hover { background: #eff6ff; }')
-    lines.append('  .number { text-align: right; font-variant-numeric: tabular-nums; }')
+    lines.append('  .gl-sheet-wrap {')
+    lines.append('    overflow: auto; border: 1px solid #c0c0c0;')
+    lines.append('    background: #fff; max-height: 80vh;')
+    lines.append('    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;')
+    lines.append('  }')
+    lines.append('  .gl-sheet { border-collapse: separate; border-spacing: 0; }')
+    lines.append('  .gl-sheet th, .gl-sheet td {')
+    lines.append('    border-right: 1px solid #d4d4d4; border-bottom: 1px solid #d4d4d4;')
+    lines.append('    padding: 4px 8px; min-width: 64px; max-width: 220px;')
+    lines.append('    font-size: 13px; line-height: 1.4; height: 22px;')
+    lines.append('    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;')
+    lines.append('  }')
+    lines.append('  /* Column-letter header row (A, B, C, ...) */')
+    lines.append('  .gl-sheet thead th {')
+    lines.append('    background: #f1f3f5; color: #333; font-weight: 600;')
+    lines.append('    text-align: center; position: sticky; top: 0; z-index: 2;')
+    lines.append('    border-top: 1px solid #d4d4d4;')
+    lines.append('  }')
+    lines.append('  /* Row-number cell on the left */')
+    lines.append('  .gl-sheet th.gl-rownum, .gl-sheet td.gl-rownum {')
+    lines.append('    background: #f1f3f5; color: #333; font-weight: 500;')
+    lines.append('    text-align: center; position: sticky; left: 0;')
+    lines.append('    min-width: 48px; max-width: 48px; z-index: 1;')
+    lines.append('  }')
+    lines.append('  .gl-sheet thead th.gl-corner {')
+    lines.append('    z-index: 3; left: 0; min-width: 48px; max-width: 48px;')
+    lines.append('  }')
+    lines.append('  /* Data cells */')
+    lines.append('  .gl-sheet tbody td.gl-cell {')
+    lines.append('    background: #fff; color: #1f2937;')
+    lines.append('    text-align: right;  /* numbers right-aligned by default, like Excel */')
+    lines.append('    font-variant-numeric: tabular-nums;')
+    lines.append('  }')
+    lines.append('  .gl-sheet tbody td.gl-cell.gl-text { text-align: left; }')
+    lines.append('  .gl-sheet tbody td.gl-cell.gl-empty { background: #fdfdfd; }')
+    lines.append('  .gl-sheet tbody tr:hover td.gl-cell { background: #fff8c4; }')
+    lines.append('  .gl-sheet tbody tr:hover td.gl-rownum { background: #e8edf2; }')
+    lines.append('  .gl-meta { color: #6b7280; font-size: 12px; margin: 4px 0 8px; }')
     lines.append('</style>')
     lines.append('')
     lines.append('<h1>{{ meta.name }}</h1>')
-    lines.append('<p><em>Imported from {{ meta.imported_from }}</em></p>')
+    lines.append('<p class="gl-meta">Imported from {{ meta.imported_from }} '
+                 '— {{ df.shape[0] }} rows × {{ df.shape[1] }} columns</p>')
     lines.append('')
 
     # Multi-sheet tabs
@@ -902,27 +920,47 @@ def _generate_present_section(all_styles: dict, sheet_names: list[str]) -> str:
         lines.append('</div>')
         lines.append('')
 
-    # Table
-    lines.append('<table class="imported-table">')
-    lines.append('  <thead><tr>')
-    lines.append('    {% for col in df.columns %}<th>{{ col }}</th>{% endfor %}')
-    lines.append('  </tr></thead>')
+    # Excel-style sheet view: column-letter headers + row numbers, every
+    # cell visible, empty cells render as blank.
+    # Compute the column letters as a literal Jinja list so the template
+    # doesn't need a `chr` filter. 702 letters covers A..ZZ — plenty.
+    letters_list = [get_column_letter(i + 1) for i in range(702)]
+    letters_literal = "[" + ", ".join(repr(l) for l in letters_list) + "]"
+
+    lines.append('{% set _letters = ' + letters_literal + ' %}')
+    lines.append('<div class="gl-sheet-wrap">')
+    lines.append('<table class="gl-sheet">')
+    lines.append('  <thead>')
+    lines.append('    <tr>')
+    lines.append('      <th class="gl-rownum gl-corner"></th>')
+    lines.append('      {% for col in df.columns %}')
+    lines.append('        <th title="{{ col }}">{{ _letters[loop.index0] }}</th>')
+    lines.append('      {% endfor %}')
+    lines.append('    </tr>')
+    lines.append('  </thead>')
     lines.append('  <tbody>')
     lines.append('    {% for _, row in df.iterrows() %}')
     lines.append('    <tr>')
+    lines.append('      <td class="gl-rownum">{{ loop.index }}</td>')
     lines.append('      {% for col in df.columns %}')
-    # Pandas promotes "int columns with one NaN" to float64, so a clean
-    # integer like 5 prints as "5.0". Strip the .0 in the template.
-    # We also blank out NaN cells so they don't render as "nan".
     lines.append('      {% set v = row[col] %}')
-    lines.append('      <td>{% if v is none or v != v %}{# NaN #}'
-                 '{% elif v is number and (v | int) == v %}{{ v | int }}'
-                 '{% else %}{{ v }}{% endif %}</td>')
+    # NaN/None → empty visible cell. Whole-number floats → int. Numbers
+    # right-aligned, text left-aligned.
+    lines.append('      {% if v is none or (v is number and v != v) %}'
+                 '<td class="gl-cell gl-empty">&nbsp;</td>'
+                 '{% elif v is number and (v | int) == v %}'
+                 '<td class="gl-cell">{{ v | int }}</td>'
+                 '{% elif v is number %}'
+                 '<td class="gl-cell">{{ v }}</td>'
+                 '{% else %}'
+                 '<td class="gl-cell gl-text">{{ v }}</td>'
+                 '{% endif %}')
     lines.append('      {% endfor %}')
     lines.append('    </tr>')
     lines.append('    {% endfor %}')
     lines.append('  </tbody>')
     lines.append('</table>')
+    lines.append('</div>')
 
     return '\n'.join(lines)
 

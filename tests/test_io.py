@@ -447,10 +447,12 @@ class TestExcelImport:
             f"Expected dedup of identical formula pattern; saw {occurrences}"
         )
 
-    # ── 5. Trailing summary rows ─────────────────────────────────────────
+    # ── 5. Trailing summary rows (kept in data, annotated in compute) ────
 
-    def test_trailing_summary_row_separated(self, tmp_path):
-        """Trailing `=SUM(...)` row goes into compute, not data."""
+    def test_trailing_summary_row_value_preserved_in_data(self, tmp_path):
+        """A trailing `=SUM(...)` row's CACHED value stays in the data
+        block (it's a real cell). The formula text appears in compute as
+        an advisory hint, but the value is NEVER stripped from data."""
         from openpyxl import Workbook
         wb = Workbook()
         ws = wb.active
@@ -458,92 +460,181 @@ class TestExcelImport:
         ws.append(["Alice", 90])
         ws.append(["Bob", 80])
         ws.append(["Carol", 70])
-        ws["A5"] = None
         ws["B5"] = "=SUM(B2:B4)"
         f = tmp_path / "with_summary.xlsx"
         wb.save(f); wb.close()
 
+        # Manually save then reload with cached values populated.
+        # openpyxl writes the formula but no cached value; just check the
+        # formula text is faithfully preserved through import.
         result = import_excel(f)
         doc = parse_string(result)
-        assert "=SUM" not in doc.data_raw
-        assert "=SUM(B2:B4)" in doc.compute_raw or "Summary cells" in doc.compute_raw
 
+        # Formula text should appear in compute (advisory).
+        assert "=SUM(B2:B4)" in doc.compute_raw
+
+        # The summary row itself MUST still appear in the data block —
+        # we never silently delete user-typed cells.
         from gridlang.schema import parse_data
         df = parse_data(doc.data_raw)
-        assert len(df) == 3
-        assert set(df["Name"]) == {"Alice", "Bob", "Carol"}
+        # 4 rows: Alice / Bob / Carol / the summary row.
+        assert len(df) == 4
 
     def test_trailing_summary_row_with_blank_above_handled(self, tmp_path):
-        """Blank rows between data and a summary row are still skipped."""
+        """Blank rows between the data and a trailing summary row stay
+        as blank rows in the imported CSV — preserving sheet layout."""
         from openpyxl import Workbook
         wb = Workbook()
         ws = wb.active
         ws.append(["A", "B"])
         ws.append([1, 10])
         ws.append([2, 20])
-        # blank row 4
+        # row 4 blank
         ws["B5"] = "=SUM(B2:B3)"
         f = tmp_path / "summary_with_gap.xlsx"
         wb.save(f); wb.close()
 
         result = import_excel(f)
         doc = parse_string(result)
-        assert "=SUM" not in doc.data_raw
-        assert "Summary cells" in doc.compute_raw or "=SUM" in doc.compute_raw
+        assert "=SUM(B2:B3)" in doc.compute_raw
 
-    # ── 6. Detached scattered rows ───────────────────────────────────────
+        from gridlang.schema import parse_data
+        df = parse_data(doc.data_raw)
+        # Two data rows + one blank + one summary row = 4 rows.
+        assert len(df) == 4
 
-    def test_detached_sparse_row_filtered_out_of_data(self, tmp_path):
-        """A sparse row separated from the dense main block by blank rows
-        is moved to compute, not the data CSV."""
+    # ── 6. Faithful preservation of every cell ───────────────────────────
+
+    def test_every_source_cell_preserved(self, tmp_path):
+        """The imported .grid must contain EVERY non-empty cell from the
+        source .xlsx — no values silently dropped, no extras invented.
+
+        This is the cardinal rule of import: faithfulness. Earlier
+        attempts at "smart" filtering deleted real user data; this test
+        prevents that regression.
+        """
         from openpyxl import Workbook
+        from openpyxl.utils import get_column_letter
         wb = Workbook()
         ws = wb.active
-        for v in range(1, 6):  # rows 1-5: dense data
+        # Dense main block.
+        for v in range(1, 6):
             ws.append([v, v, v, v])
-        # rows 6, 7 are blank (skipped by openpyxl)
-        ws["A8"] = 999  # detached sparse row
+        # Trailing scatter that earlier code wrongly filtered out:
+        # blank rows 6-7, then row 8 with two values, then a summary.
+        ws["A8"] = 999
         ws["B8"] = 888
-        f = tmp_path / "detached.xlsx"
+        ws["A10"] = "=SUM(A1:A8)"  # we won't compute it; just store the formula
+        f = tmp_path / "faithful.xlsx"
         wb.save(f); wb.close()
 
-        result = import_excel(f)
-        doc = parse_string(result)
-        # Detached cells must NOT appear in data CSV.
-        assert "999" not in doc.data_raw
-        assert "888" not in doc.data_raw
-        # They should be flagged in compute.
-        assert "A8" in doc.compute_raw and "999" in doc.compute_raw
+        # Collect every non-empty cell as written.
+        # Use data_only=False so we see formula cells whose cached value
+        # hasn't been computed (openpyxl never executes formulas).
+        from openpyxl import load_workbook
+        wb2 = load_workbook(f, data_only=False)
+        ws2 = wb2.active
+        src = {}
+        for row in ws2.iter_rows():
+            for c in row:
+                if c.value is not None:
+                    src[c.coordinate] = c.value
 
-    def test_dense_main_block_intact_when_no_detached(self, tmp_path):
-        """A clean dense block stays in data; nothing flagged as detached."""
+        # Parse imported .grid back into cell map.
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        df = parse_data(parse_string(result).data_raw)
+        imp = {}
+        for r_idx, (_, row) in enumerate(df.iterrows()):
+            for c_idx, val in enumerate(row):
+                if val is None:
+                    continue
+                if isinstance(val, float) and val != val:  # NaN
+                    continue
+                if isinstance(val, str) and val == "":
+                    continue
+                coord = f"{get_column_letter(c_idx + 1)}{r_idx + 1}"
+                imp[coord] = val
+
+        # Same set of populated coordinates, same values (allowing
+        # int/float numeric equality).
+        missing = set(src) - set(imp)
+        extra = set(imp) - set(src)
+        assert not missing, f"Cells dropped from import: {sorted(missing)}"
+        assert not extra, f"Cells invented during import: {sorted(extra)}"
+        for k in src:
+            s, i = src[k], imp[k]
+            # Formula text: just ensure the formula round-tripped.
+            if isinstance(s, str) and s.startswith("="):
+                assert isinstance(i, str) and i == s, f"{k}: {s!r} != {i!r}"
+                continue
+            try:
+                assert float(s) == float(i), f"{k}: {s!r} != {i!r}"
+            except (TypeError, ValueError):
+                assert s == i, f"{k}: {s!r} != {i!r}"
+
+    def test_internal_blank_row_preserved(self, tmp_path):
+        """A blank row INSIDE the data block stays in place — it's part
+        of the user's layout."""
         from openpyxl import Workbook
         wb = Workbook()
         ws = wb.active
         ws.append(["A", "B"])
         ws.append([1, 2])
-        ws.append([3, 4])
-        f = tmp_path / "clean.xlsx"
+        # Row 3 is blank.
+        ws["A4"] = 3
+        ws["B4"] = 4
+        f = tmp_path / "internal_blank.xlsx"
         wb.save(f); wb.close()
 
         result = import_excel(f)
-        doc = parse_string(result)
-        assert "Detached cells" not in doc.compute_raw
         from gridlang.schema import parse_data
-        df = parse_data(doc.data_raw)
-        assert len(df) == 2
+        df = parse_data(parse_string(result).data_raw)
+        # Three data rows: [1,2], blank, [3,4].
+        assert len(df) == 3
+        # Row 1 = (1, 2), row 2 = (NaN, NaN), row 3 = (3, 4)
+        assert int(df.iloc[0, 0]) == 1
+        # Middle row is fully empty.
+        v_a, v_b = df.iloc[1, 0], df.iloc[1, 1]
+        assert (v_a is None or (isinstance(v_a, float) and v_a != v_a))
+        assert (v_b is None or (isinstance(v_b, float) and v_b != v_b))
+        assert int(df.iloc[2, 0]) == 3
+        assert int(df.iloc[2, 1]) == 4
+
+    def test_trailing_blank_rows_trimmed(self, tmp_path):
+        """Trailing fully-blank rows are NOT preserved (they extend the
+        sheet's max_row but contain no user data)."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["A", "B"])
+        ws.append([1, 2])
+        ws["A10"] = None  # touch a far-away cell, then clear it
+        f = tmp_path / "trailing_blank.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        df = parse_data(parse_string(result).data_raw)
+        # Just the one real data row.
+        assert len(df) == 1
 
     # ── 7. End-to-end render ─────────────────────────────────────────────
 
     def test_e2e_render_no_floaty_integers(self, tmp_path):
         """The full pipeline (import → parse → execute → render) on a
-        sheet that triggers float-promotion must NOT show 1.0 / 2.0 …"""
+        sheet that triggers float-promotion must NOT show 1.0 / 2.0 …
+
+        ALSO: every source cell must round-trip into the rendered HTML —
+        no row silently dropped just because it was sparse.
+        """
         from openpyxl import Workbook
         wb = Workbook()
         ws = wb.active
         for v in range(1, 11):
             ws.append([v] * 5)
-        # One row with an empty cell to force NaN → float64 promotion
+        # A sparse trailing row [99, None×4]. Must STILL appear in render
+        # (faithful preservation), and "99" should render as plain int.
         ws.append([99, None, None, None, None])
         f = tmp_path / "render_check.xlsx"
         wb.save(f); wb.close()
@@ -559,11 +650,15 @@ class TestExcelImport:
             template_content=doc.present_raw, df=out.df,
             aggregates=out.aggregates, meta=doc.meta,
         )
-        # The detached row [99, None×4] should be filtered out.
-        # The remaining 10 rows of all-equal numbers must render as int.
         import re
         body = re.search(r"<tbody>(.*?)</tbody>", html, re.S).group(1)
-        for n in range(1, 11):
+        # Faithful: 11 rows in, 11 rows out.
+        rendered_rows = re.findall(r"<tr>.*?</tr>", body, re.S)
+        assert len(rendered_rows) == 11, (
+            f"Expected 11 <tr> rows (10 dense + 1 sparse), got {len(rendered_rows)}"
+        )
+        # No "1.0", "5.0", "99.0" should appear.
+        for n in (1, 5, 10, 99):
             assert f">{n}<" in body, f"Missing integer cell '{n}' in rendered HTML"
             assert f">{n}.0<" not in body, f"Integer {n} rendered as float {n}.0"
 
@@ -611,6 +706,115 @@ class TestExcelImport:
         # Still parses as a valid 4-section file.
         doc = parse_string(result)
         assert "def transform" in doc.compute_raw
+
+    # ── 9. Real-world fixture parity check ───────────────────────────────
+
+    def test_excel_style_view_has_letter_columns_and_row_numbers(self, tmp_path):
+        """The auto-generated present template renders as a spreadsheet
+        view: A/B/C... column headers, 1/2/3... row numbers, every cell
+        visible (empty cells render as blank ``<td>``)."""
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        for v in (1, 2, 3):
+            ws.append([v, v, v, v])
+        # row 5 blank
+        ws["A6"] = 99
+        f = tmp_path / "excel_style.xlsx"
+        wb.save(f); wb.close()
+
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        from gridlang.runtime import execute
+        from gridlang.renderer import render
+        doc = parse_string(result)
+        df = parse_data(doc.data_raw)
+        out = execute(doc.compute_raw, df)
+        html = render(
+            template_content=doc.present_raw, df=out.df,
+            aggregates=out.aggregates, meta=doc.meta,
+        )
+
+        import re
+
+        # Column letters: A, B, C, D in <thead>.
+        thead = re.search(r"<thead>(.*?)</thead>", html, re.S).group(1)
+        for letter in ["A", "B", "C", "D"]:
+            assert f">{letter}</th>" in thead, f"Missing column letter {letter}"
+
+        # Row numbers in <tbody>.
+        body = re.search(r"<tbody>(.*?)</tbody>", html, re.S).group(1)
+        rows = re.findall(r"<tr>.*?</tr>", body, re.S)
+        # 6 rows: rows 1-3 (data), 4 (blank — nothing was written there),
+        # 5 (blank), 6 (sparse: A6=99).
+        # Note: openpyxl does write row 4 even though we appended 3 rows,
+        # because ws["A6"] forces the worksheet to extend. Either way we
+        # expect EVERY row from 1 through the last non-empty row.
+        assert len(rows) >= 4, f"Expected at least 4 rendered rows, got {len(rows)}"
+        for i in range(1, len(rows) + 1):
+            assert f'class="gl-rownum">{i}</td>' in rows[i - 1], f"Missing row number {i}"
+
+        # Some row in the middle is blank — must show visible empty cells.
+        any_blank = any("gl-empty" in r for r in rows[3:])
+        assert any_blank, "No blank row had visible empty cells"
+        # The last row has 99 in column A.
+        assert ">99<" in rows[-1]
+        assert rows[-1].count("gl-empty") == 3
+
+    def test_测试1_xlsx_cell_parity(self, tmp_path):
+        """The exact `测试1.xlsx` the user reported MUST round-trip every
+        cell. This pins the regression that the 'detached row' filter
+        introduced (it dropped A24=1, B24=2, A27=2082)."""
+        from openpyxl import Workbook
+        from openpyxl.utils import get_column_letter
+        from openpyxl import load_workbook
+
+        # Reconstruct the exact failing layout: 21 dense rows of 1..21
+        # across 15 columns, blank rows 22-23, [1,2] in row 24, blank
+        # rows 25-26, =SUM(A1:I26) at A27 (cached value 2082).
+        wb = Workbook()
+        ws = wb.active
+        for v in range(1, 22):
+            ws.append([v] * 15)
+        # Skip rows 22, 23 by writing directly to row 24.
+        ws["A24"] = 1
+        ws["B24"] = 2
+        # Row 27: a formula. We deliberately don't set a cached value
+        # because openpyxl doesn't compute formulas — but the cell is
+        # still a real cell that the import must surface.
+        ws["A27"] = "=SUM(A1:I26)"
+        f = tmp_path / "测试1.xlsx"
+        wb.save(f); wb.close()
+
+        # Source side: every non-empty cell. Use data_only=False so
+        # formula cells without a cached value still register.
+        wb2 = load_workbook(f, data_only=False)
+        ws2 = wb2.active
+        src = {c.coordinate: c.value
+               for row in ws2.iter_rows() for c in row
+               if c.value is not None}
+
+        # Imported side.
+        result = import_excel(f)
+        from gridlang.schema import parse_data
+        df = parse_data(parse_string(result).data_raw)
+        imp = {}
+        for r_idx, (_, row) in enumerate(df.iterrows()):
+            for c_idx, val in enumerate(row):
+                if val is None: continue
+                if isinstance(val, float) and val != val: continue
+                if isinstance(val, str) and val == "": continue
+                coord = f"{get_column_letter(c_idx + 1)}{r_idx + 1}"
+                imp[coord] = val
+
+        missing = set(src) - set(imp)
+        assert not missing, (
+            f"Cells dropped: {sorted(missing)} — these were in the source "
+            f"but vanished after import. This is the exact bug from 测试1.xlsx."
+        )
+        # Spot-check the three cells that historically were dropped.
+        for k in ("A24", "B24", "A27"):
+            assert k in imp, f"{k} (a real source cell) missing from import"
 
 
 class TestExcelExport:
